@@ -3,17 +3,19 @@
 namespace App\Http\Controllers;
 
 use App\Models\User;
+use App\Models\Organization;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Validation\ValidationException;
+use Illuminate\Support\Str;
 
 class AuthController extends Controller
 {
     public function register(Request $request)
     {
         // Manual validation to ensure JSON response
-        $validator = \Validator::make($request->all(), [
+        $validator = Validator::make($request->all(), [
             'name' => 'required|string|max:255',
             'email' => 'required|string|email|max:255|unique:users',
             'password' => 'required|string|min:8',
@@ -29,18 +31,31 @@ class AuthController extends Controller
 
         $validated = $validator->validated();
 
+        // Create organization if not provided
+        if (empty($validated['org_id'])) {
+            $organization = Organization::create([
+                'name' => $validated['name'] . "'s Organization",
+                'settings' => [],
+                'plan' => 'free',
+            ]);
+            $orgId = $organization->id;
+        } else {
+            $orgId = $validated['org_id'];
+        }
+
         $user = User::create([
             'name' => $validated['name'],
             'email' => $validated['email'],
             'password' => Hash::make($validated['password']),
-            'org_id' => $validated['org_id'] ?? null,
-            'role' => 'user',
+            'org_id' => $orgId,
+            'role' => 'admin', // First user in organization is admin
         ]);
 
         $token = $user->createToken('api-token')->plainTextToken;
 
         return response()->json([
             'user' => $user,
+            'organization' => $user->organization ?? null,
             'token' => $token,
         ], 201);
     }
@@ -129,6 +144,7 @@ class AuthController extends Controller
 
         return response()->json([
             'user' => $user,
+            'organization' => $user->organization,
             'token' => $token,
         ]);
     }

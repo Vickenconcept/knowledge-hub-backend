@@ -53,4 +53,9 @@ class User extends Authenticatable
     {
         return $this->twitter_account_connected && $this->twitter_account_id && $this->twitter_access_token;
     }
+
+    public function organization()
+    {
+        return $this->belongsTo(Organization::class, 'org_id');
+    }
 }
