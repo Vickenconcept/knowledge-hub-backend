@@ -19,6 +19,43 @@ Route::get('health', function () {
     ]);
 });
 
+Route::post('test-login', function (Request $request) {
+    return response()->json([
+        'message' => 'Test endpoint working',
+        'method' => $request->method(),
+        'content_type' => $request->header('Content-Type'),
+        'origin' => $request->header('Origin'),
+        'body' => $request->all(),
+    ]);
+});
+
+// Simple login test endpoint
+Route::post('test-auth', function (Request $request) {
+    $email = $request->input('email');
+    $password = $request->input('password');
+    
+    $user = \App\Models\User::where('email', $email)->first();
+    
+    if (!$user) {
+        return response()->json(['error' => 'User not found'], 404);
+    }
+    
+    $passwordMatch = \Illuminate\Support\Facades\Hash::check($password, $user->password);
+    
+    return response()->json([
+        'email' => $email,
+        'password_length' => strlen($password),
+        'user_found' => !!$user,
+        'user_name' => $user->name,
+        'password_match' => $passwordMatch,
+        'success' => $passwordMatch
+    ]);
+});
+
+Route::options('{any}', function () {
+    return response('', 200);
+})->where('any', '.*');
+
 Route::middleware('auth:sanctum')->group(function () {
     Route::post('auth/logout', [AuthController::class, 'logout']);
     Route::get('/user', function (Request $request) {
@@ -35,6 +72,10 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('orgs/{org}/connectors', [ConnectorController::class, 'create']);
     Route::post('connectors/{id}/oauth/callback', [ConnectorController::class, 'oauthCallback']);
     Route::post('connectors/{id}/start-ingest', [ConnectorController::class, 'startIngest']);
+
+    // Google Drive OAuth
+    Route::get('connectors/google-drive/auth-url', [ConnectorController::class, 'getGoogleDriveAuthUrl']);
+    Route::post('connectors/google-drive/callback', [ConnectorController::class, 'handleGoogleDriveCallback']);
 
     // Documents
     Route::get('documents', [DocumentController::class, 'index']);

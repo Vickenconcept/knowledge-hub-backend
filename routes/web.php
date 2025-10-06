@@ -17,10 +17,7 @@ Route::middleware('guest')->group(function () {
     Route::view('register/success', 'auth.success')->name('register.success');
 
 
-    Route::controller(AuthController::class)->prefix('auth')->name('auth.')->group(function () {
-        Route::post('/register', 'register')->name('register');
-        Route::post('/login', 'login')->name('login');
-    });
+    // Auth routes moved to API routes for SPA authentication
     Route::controller(PasswordResetController::class)->group(function () {
         Route::get('forgot-password', 'index')->name('password.request');
         Route::post('forgot-password', 'store')->name('password.email');
@@ -31,7 +28,7 @@ Route::middleware('guest')->group(function () {
 
 
 Route::middleware(['auth'])->group(function () {
-    Route::get('auth/logout', [AuthController::class, 'logout'])->name('auth.logout');
+    // Logout moved to API routes for SPA authentication
     Route::get('/home', function () {
         return view('dashboard');
     })->name('home');
