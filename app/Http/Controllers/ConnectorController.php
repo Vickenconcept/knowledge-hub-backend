@@ -90,14 +90,28 @@ class ConnectorController extends Controller
             'https://www.googleapis.com/auth/userinfo.profile',
         ]);
 
-        // Create a connector record in disconnected state so we can attach tokens on callback
-        $connector = Connector::create([
-            'id' => (string) Str::uuid(),
-            'org_id' => $request->user()->org_id,
-            'type' => 'google_drive',
-            'label' => 'Google Drive',
-            'status' => 'disconnected',
-        ]);
+        // Check if Google Drive connector already exists for this organization
+        $existingConnector = Connector::where('org_id', $request->user()->org_id)
+            ->where('type', 'google_drive')
+            ->first();
+
+        if ($existingConnector) {
+            // Update existing connector if it's disconnected
+            if ($existingConnector->status === 'disconnected') {
+                $connector = $existingConnector;
+            } else {
+                return response()->json(['message' => 'Google Drive is already connected for this organization'], 409);
+            }
+        } else {
+            // Create a new connector record
+            $connector = Connector::create([
+                'id' => (string) Str::uuid(),
+                'org_id' => $request->user()->org_id,
+                'type' => 'google_drive',
+                'label' => 'GDrive',
+                'status' => 'disconnected',
+            ]);
+        }
 
         // State can include connector id to reconcile on callback
         $state = json_encode(['connector_id' => $connector->id]);
@@ -113,19 +127,41 @@ class ConnectorController extends Controller
     {
         $code = (string) $request->query('code', '');
         $stateB64 = (string) $request->query('state', '');
+        
         if ($code === '' || $stateB64 === '') {
-            return response()->json(['message' => 'Missing code or state'], 422);
+            if ($request->isJson()) {
+                return response()->json(['message' => 'Missing code or state'], 422);
+            }
+            // For GET requests (Google redirect), redirect to frontend with error
+            return redirect(env('FRONTEND_URL', 'http://localhost:3000') . '/connectors?error=missing_code_or_state');
         }
 
         $state = json_decode(base64_decode($stateB64), true) ?: [];
         $connectorId = $state['connector_id'] ?? null;
         if (!$connectorId) {
-            return response()->json(['message' => 'Invalid state'], 422);
+            if ($request->isJson()) {
+                return response()->json(['message' => 'Invalid state'], 422);
+            }
+            return redirect(env('FRONTEND_URL', 'http://localhost:3000') . '/connectors?error=invalid_state');
         }
 
-        $connector = Connector::where('id', $connectorId)
-            ->where('org_id', $request->user()->org_id)
-            ->firstOrFail();
+        // For GET requests, we need to authenticate the user differently
+        if ($request->isMethod('GET')) {
+            // Get the user from the connector's organization
+            $connector = Connector::find($connectorId);
+            if (!$connector) {
+                return redirect(env('FRONTEND_URL', 'http://localhost:3000') . '/connectors?error=connector_not_found');
+            }
+            
+            $user = \App\Models\User::where('org_id', $connector->org_id)->first();
+            if (!$user) {
+                return redirect(env('FRONTEND_URL', 'http://localhost:3000') . '/connectors?error=user_not_found');
+            }
+        } else {
+            $connector = Connector::where('id', $connectorId)
+                ->where('org_id', $request->user()->org_id)
+                ->firstOrFail();
+        }
 
         $client = new GoogleClient();
         $client->setClientId(env('GOOGLE_CLIENT_ID'));
@@ -134,7 +170,10 @@ class ConnectorController extends Controller
 
         $token = $client->fetchAccessTokenWithAuthCode($code);
         if (isset($token['error'])) {
-            return response()->json(['message' => 'OAuth error', 'error' => $token['error']], 400);
+            if ($request->isJson()) {
+                return response()->json(['message' => 'OAuth error', 'error' => $token['error']], 400);
+            }
+            return redirect(env('FRONTEND_URL', 'http://localhost:3000') . '/connectors?error=oauth_error');
         }
 
         $connector->encrypted_tokens = encrypt(json_encode($token));
@@ -142,12 +181,21 @@ class ConnectorController extends Controller
         $connector->save();
 
         // Optionally kick off ingestion immediately
-        IngestConnectorJob::dispatch($connector->id, $request->user()->org_id)->onQueue('default');
+        if ($request->isMethod('POST')) {
+            IngestConnectorJob::dispatch($connector->id, $request->user()->org_id)->onQueue('default');
+        } else {
+            IngestConnectorJob::dispatch($connector->id, $connector->org_id)->onQueue('default');
+        }
 
-        return response()->json([
-            'message' => 'Google Drive connected',
-            'connector' => $connector,
-        ]);
+        if ($request->isJson()) {
+            return response()->json([
+                'message' => 'Google Drive connected',
+                'connector' => $connector,
+            ]);
+        }
+
+        // For GET requests (Google redirect), redirect to frontend with success
+        return redirect(env('FRONTEND_URL', 'http://localhost:3000') . '/connectors?success=google_drive_connected');
     }
 }
 

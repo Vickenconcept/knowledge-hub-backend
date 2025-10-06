@@ -75,6 +75,7 @@ Route::middleware('auth:sanctum')->group(function () {
 
     // Google Drive OAuth
     Route::get('connectors/google-drive/auth-url', [ConnectorController::class, 'getGoogleDriveAuthUrl']);
+    Route::get('connectors/google-drive/callback', [ConnectorController::class, 'handleGoogleDriveCallback']);
     Route::post('connectors/google-drive/callback', [ConnectorController::class, 'handleGoogleDriveCallback']);
 
     // Documents
