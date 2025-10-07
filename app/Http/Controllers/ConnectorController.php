@@ -26,7 +26,7 @@ class ConnectorController extends Controller
         // Check for running ingest jobs and update connector status
         foreach ($connectors as $connector) {
             $runningJob = IngestJob::where('connector_id', $connector->id)
-                ->whereIn('status', ['running', 'queued'])
+                ->whereIn('status', ['running', 'queued', 'processing_large_files'])
                 ->first();
             
             if ($runningJob) {

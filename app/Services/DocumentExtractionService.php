@@ -36,8 +36,8 @@ class DocumentExtractionService
         // Remove HTML tags and decode entities
         $text = strip_tags($content);
         $text = html_entity_decode($text, ENT_QUOTES, 'UTF-8');
-        return trim($text);
-    }
+                    return trim($text);
+                }
 
     private function extractCsvText($content)
     {
@@ -51,55 +51,65 @@ class DocumentExtractionService
             }
         }
         
-        return trim($text);
-    }
+                    return trim($text);
+                }
 
     private function extractPdfText($content)
     {
         \Log::info('Attempting PDF text extraction', ['content_length' => strlen($content)]);
         
+        $tempPdfPath = null;
+        
         try {
-            // Save content to temporary file (required by pdftotext)
-            $tempPdfPath = sys_get_temp_dir() . '/' . uniqid('pdf_') . '.pdf';
-            file_put_contents($tempPdfPath, $content);
-            
             // Try using Spatie's pdf-to-text (best option - uses pdftotext)
             if (class_exists('\Spatie\PdfToText\Pdf')) {
                 try {
-                    $text = \Spatie\PdfToText\Pdf::getText($tempPdfPath);
-                    unlink($tempPdfPath);
+                    // Create unique temp file for pdftotext
+                    $tempPdfPath = sys_get_temp_dir() . '/' . uniqid('pdf_pdftotext_') . '.pdf';
+                    file_put_contents($tempPdfPath, $content);
+                    
+                    // Set the path to pdftotext executable
+                    $pdftotextPath = 'C:\poppler\poppler-24.08.0\Library\bin\pdftotext.exe';
+                    
+                    $text = \Spatie\PdfToText\Pdf::getText($tempPdfPath, $pdftotextPath);
+                    
+                    // Clean up temp file immediately
+                    if (file_exists($tempPdfPath)) {
+                        unlink($tempPdfPath);
+                        $tempPdfPath = null;
+                    }
                     
                     if (!empty(trim($text))) {
                         \Log::info('PDF text extracted successfully with pdftotext', ['text_length' => strlen($text)]);
-                        return trim($text);
+                        // Sanitize text before returning
+                        return $this->sanitizeText($text);
                     }
                 } catch (\Exception $e) {
                     \Log::warning('pdftotext extraction failed, trying fallback: ' . $e->getMessage());
+                    // Clean up temp file if it exists
+                    if ($tempPdfPath && file_exists($tempPdfPath)) {
+                        unlink($tempPdfPath);
+                        $tempPdfPath = null;
+                    }
                 }
             }
             
-            // Fallback: Try Smalot PDFParser if pdftotext isn't available
+            // Fallback: Try Smalot PDFParser if pdftotext isn't available or failed
             if (class_exists('\Smalot\PdfParser\Parser')) {
-                try {
-                    $parser = new \Smalot\PdfParser\Parser();
+            try {
+                $parser = new \Smalot\PdfParser\Parser();
+                    // Parse directly from content (no temp file needed - safer!)
                     $pdf = $parser->parseContent($content);
                     $text = $pdf->getText();
-                    unlink($tempPdfPath);
                     
                     if (!empty(trim($text))) {
                         \Log::info('PDF text extracted successfully with Smalot parser', ['text_length' => strlen($text)]);
-                        // Clean up problematic characters
-                        $text = $this->sanitizeText($text);
-                        return trim($text);
+                        // Sanitize text before returning
+                        return $this->sanitizeText($text);
                     }
                 } catch (\Exception $e) {
                     \Log::warning('Smalot parser extraction failed: ' . $e->getMessage());
                 }
-            }
-            
-            // Clean up temp file if still exists
-            if (file_exists($tempPdfPath)) {
-                unlink($tempPdfPath);
             }
             
             // If all methods fail, log and return empty
@@ -109,6 +119,15 @@ class DocumentExtractionService
         } catch (\Exception $e) {
             \Log::error('PDF extraction error: ' . $e->getMessage());
             return '';
+        } finally {
+            // Final cleanup - ensure temp file is deleted if it exists
+            if ($tempPdfPath && file_exists($tempPdfPath)) {
+                try {
+                    unlink($tempPdfPath);
+                } catch (\Exception $e) {
+                    // Ignore cleanup errors
+                }
+            }
         }
     }
 
@@ -130,22 +149,107 @@ class DocumentExtractionService
         // Remove null bytes and other problematic characters
         $text = str_replace("\0", '', $text);
         
-        // Fix UTF-8 encoding issues
-        $text = mb_convert_encoding($text, 'UTF-8', 'UTF-8');
+        // Replace Windows-1252 "smart quotes" and special characters with ASCII equivalents
+        $replacements = [
+            "\xC2\x82" => ',',        // U+201A single low-9 quotation mark
+            "\xC2\x84" => ',,',       // U+201E double low-9 quotation mark
+            "\xC2\x85" => '...',      // U+2026 horizontal ellipsis
+            "\xC2\x88" => '^',        // U+02C6 modifier letter circumflex
+            "\xC2\x91" => "'",        // U+2018 left single quotation mark
+            "\xC2\x92" => "'",        // U+2019 right single quotation mark
+            "\xC2\x93" => '"',        // U+201C left double quotation mark
+            "\xC2\x94" => '"',        // U+201D right double quotation mark
+            "\xC2\x95" => '*',        // U+2022 bullet
+            "\xC2\x96" => '-',        // U+2013 en dash
+            "\xC2\x97" => '--',       // U+2014 em dash
+            "\xC2\x99" => '(TM)',     // U+2122 trademark
+            "\xC2\x9C" => 'oe',       // U+0153 ligature oe
+            "\xC2\x9D" => '>',        // U+203A single right-pointing angle quotation
+            "\xC2\x9E" => '',         // U+017E latin small letter z with caron
+            "\xE2\x80\x93" => '-',    // U+2013 en dash
+            "\xE2\x80\x94" => '--',   // U+2014 em dash
+            "\xE2\x80\x98" => "'",    // U+2018 left single quotation mark
+            "\xE2\x80\x99" => "'",    // U+2019 right single quotation mark
+            "\xE2\x80\x9A" => ',',    // U+201A single low-9 quotation mark
+            "\xE2\x80\x9C" => '"',    // U+201C left double quotation mark
+            "\xE2\x80\x9D" => '"',    // U+201D right double quotation mark
+            "\xE2\x80\x9E" => ',,',   // U+201E double low-9 quotation mark
+            "\xE2\x80\xA2" => '*',    // U+2022 bullet
+            "\xE2\x80\xA6" => '...',  // U+2026 horizontal ellipsis
+            "\xE2\x84\xA2" => '(TM)', // U+2122 trademark
+        ];
+        $text = str_replace(array_keys($replacements), array_values($replacements), $text);
         
-        // Remove invalid UTF-8 sequences
+        // Convert to UTF-8 from any encoding
+        if (!mb_check_encoding($text, 'UTF-8')) {
+            $text = mb_convert_encoding($text, 'UTF-8', 'auto');
+        }
+        
+        // Remove invalid UTF-8 sequences more aggressively
         $text = iconv('UTF-8', 'UTF-8//IGNORE', $text);
         
-        // Remove 4-byte UTF-8 characters (emojis, special symbols) that might cause issues
+        // Remove any remaining control characters except newlines, tabs, and spaces
+        $text = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/u', '', $text);
+        
+        // Remove ALL characters outside basic multilingual plane (anything above 3-byte UTF-8)
+        // This catches mathematical symbols, emojis, rare symbols, etc.
         $text = preg_replace('/[\x{10000}-\x{10FFFF}]/u', '', $text);
         
-        return $text;
+        // Remove specific problematic Unicode ranges that cause MySQL utf8mb4 issues
+        // Mathematical Alphanumeric Symbols (𝐀-𝟿), Private Use Area, etc.
+        $text = preg_replace('/[\x{1D400}-\x{1D7FF}]/u', '', $text); // Math symbols
+        $text = preg_replace('/[\x{E000}-\x{F8FF}]/u', '', $text);   // Private use
+        $text = preg_replace('/[\x{F0000}-\x{FFFFF}]/u', '', $text); // Supplementary Private Use
+        
+        // Replace common mathematical/scientific symbols that appear in PDFs
+        $mathReplacements = [
+            '≤' => '<=',
+            '≥' => '>=',
+            '≠' => '!=',
+            '±' => '+/-',
+            '×' => 'x',
+            '÷' => '/',
+            '°' => ' degrees ',
+            'λ' => 'lambda',
+            'μ' => 'mu',
+            'σ' => 'sigma',
+            'π' => 'pi',
+            'Δ' => 'Delta',
+            'Σ' => 'Sigma',
+            'Ω' => 'Omega',
+            'α' => 'alpha',
+            'β' => 'beta',
+            'γ' => 'gamma',
+            'θ' => 'theta',
+            '→' => '->',
+            '←' => '<-',
+            '↑' => '^',
+            '↓' => 'v',
+            '∞' => 'infinity',
+            '∫' => 'integral',
+            '√' => 'sqrt',
+            '∑' => 'sum',
+            '∏' => 'product',
+        ];
+        $text = str_replace(array_keys($mathReplacements), array_values($mathReplacements), $text);
+        
+        // NUCLEAR OPTION: Convert ALL non-ASCII to closest ASCII equivalent or remove
+        // This ensures 100% MySQL compatibility (only printable ASCII + space/newline/tab)
+        $text = iconv('UTF-8', 'ASCII//TRANSLIT//IGNORE', $text);
+        
+        // Remove any remaining non-printable characters except newlines and tabs
+        $text = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', '', $text);
+        
+        // Ensure we only have ASCII characters (0x20-0x7E plus \r\n\t)
+        $text = preg_replace('/[^\x20-\x7E\r\n\t]/', '', $text);
+        
+        return trim($text);
     }
 
     public function chunkText($text, $chunkSize = 2000, $overlap = 200)
     {
-        // Sanitize text before chunking
-        $text = $this->sanitizeText($text);
+        // Text is already sanitized in extractText methods
+        // No need to sanitize again here
         
         if (strlen($text) <= $chunkSize) {
             return [$text];

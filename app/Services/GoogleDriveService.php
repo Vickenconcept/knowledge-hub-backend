@@ -85,7 +85,7 @@ class GoogleDriveService
         try {
             $optParams = [
                 'pageSize' => $maxResults,
-                'fields' => 'nextPageToken, files(id, name, mimeType, size, modifiedTime, webViewLink, webContentLink)',
+                'fields' => 'nextPageToken, files(id, name, mimeType, size, modifiedTime, md5Checksum, webViewLink, webContentLink)',
                 'q' => "trashed=false and (mimeType contains 'text/' or mimeType contains 'application/pdf' or mimeType contains 'application/vnd.google-apps.document' or mimeType contains 'application/vnd.google-apps.presentation' or mimeType contains 'application/vnd.google-apps.spreadsheet')"
             ];
 

@@ -1,0 +1,227 @@
+<?php
+
+namespace App\Jobs;
+
+use App\Models\Document;
+use App\Models\Chunk;
+use App\Services\GoogleDriveService;
+use App\Services\DocumentExtractionService;
+use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Queue\ShouldQueue;
+use Illuminate\Foundation\Bus\Dispatchable;
+use Illuminate\Queue\InteractsWithQueue;
+use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
+
+class ProcessLargeFileJob implements ShouldQueue
+{
+    use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
+
+    // Increase timeout to 2 hours for very large files
+    public $timeout = 7200;
+    
+    // Allow 2 attempts
+    public $tries = 2;
+
+    public function __construct(
+        public string $connectorId,
+        public string $orgId,
+        public string $ingestJobId,
+        public array $fileData,
+        public array $tokens
+    ) {
+    }
+
+    public function handle(): void
+    {
+        Log::info('=== ProcessLargeFileJob STARTED ===', [
+            'file_name' => $this->fileData['name'],
+            'file_size' => $this->fileData['size'],
+            'file_id' => $this->fileData['id']
+        ]);
+
+        $driveService = new GoogleDriveService();
+        $extractor = new DocumentExtractionService();
+
+        try {
+            // Refresh token if needed
+            $newToken = $driveService->refreshTokenIfNeeded($this->tokens);
+            if ($newToken) {
+                $this->tokens = $newToken;
+                // Update connector with new token
+                $connector = \App\Models\Connector::find($this->connectorId);
+                if ($connector) {
+                    $connector->encrypted_tokens = encrypt(json_encode($newToken));
+                    $connector->save();
+                }
+            }
+
+            $driveService->setAccessToken($this->tokens);
+
+            Log::info('Fetching large file content', ['name' => $this->fileData['name']]);
+            
+            // Get file content
+            $content = $driveService->getFileContent(
+                $this->fileData['id'],
+                $this->fileData['mime_type']
+            );
+            
+            Log::info('Large file content fetched', [
+                'size' => strlen($content),
+                'size_mb' => round(strlen($content) / (1024 * 1024), 2) . ' MB'
+            ]);
+
+            // Extract text
+            $text = $extractor->extractText(
+                $content,
+                $this->fileData['mime_type'],
+                $this->fileData['name']
+            );
+
+            if (empty(trim($text))) {
+                Log::warning('No text extracted from large file', ['name' => $this->fileData['name']]);
+                // Still update IngestJob to decrement pending_large_files count
+                $this->updateIngestJobStats(0, 0);
+                return;
+            }
+
+            Log::info('Text extracted from large file', ['text_length' => strlen($text)]);
+
+            $contentHash = hash('sha256', $content);
+
+            // Check for existing document
+            $existingDocument = Document::where('org_id', $this->orgId)
+                ->where('connector_id', $this->connectorId)
+                ->where('source_url', $this->fileData['web_view_link'])
+                ->first();
+
+            if ($existingDocument && $existingDocument->sha256 === $contentHash) {
+                Log::info('Large file unchanged, skipping', ['name' => $this->fileData['name']]);
+                // Still update IngestJob to decrement pending_large_files count
+                $this->updateIngestJobStats(0, 0);
+                return;
+            }
+
+            if ($existingDocument) {
+                // Update existing document
+                Chunk::where('document_id', $existingDocument->id)->delete();
+                $existingDocument->update([
+                    'title' => $this->fileData['name'],
+                    'mime_type' => $this->fileData['mime_type'],
+                    'sha256' => $contentHash,
+                    'size' => strlen($content),
+                    'fetched_at' => now(),
+                ]);
+                $document = $existingDocument;
+                Log::info('Large file updated', ['name' => $this->fileData['name']]);
+            } else {
+                // Create new document
+                $document = Document::create([
+                    'id' => (string) Str::uuid(),
+                    'org_id' => $this->orgId,
+                    'connector_id' => $this->connectorId,
+                    'title' => $this->fileData['name'],
+                    'source_url' => $this->fileData['web_view_link'],
+                    'mime_type' => $this->fileData['mime_type'],
+                    'sha256' => $contentHash,
+                    'size' => strlen($content),
+                    's3_path' => null,
+                    'fetched_at' => now(),
+                ]);
+                Log::info('Large file document created', ['name' => $this->fileData['name']]);
+            }
+
+            // Create chunks
+            $textChunks = $extractor->chunkText($text);
+            Log::info('Creating chunks for large file', [
+                'name' => $this->fileData['name'],
+                'chunk_count' => count($textChunks)
+            ]);
+
+            foreach ($textChunks as $index => $chunkText) {
+                Chunk::create([
+                    'id' => (string) Str::uuid(),
+                    'org_id' => $this->orgId,
+                    'document_id' => $document->id,
+                    'chunk_index' => $index,
+                    'text' => $chunkText,
+                    'char_start' => $index * 2000,
+                    'char_end' => ($index + 1) * 2000,
+                    'token_count' => str_word_count($chunkText),
+                ]);
+            }
+
+            Log::info('✅ Large file processed successfully', [
+                'name' => $this->fileData['name'],
+                'chunks_created' => count($textChunks)
+            ]);
+            
+            // Update the parent IngestJob stats
+            $this->updateIngestJobStats(count($textChunks), 0);
+
+        } catch (\Exception $e) {
+            Log::error('❌ Error processing large file', [
+                'name' => $this->fileData['name'],
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+            
+            // Update parent IngestJob with error
+            $this->updateIngestJobStats(0, 1);
+            
+            throw $e; // Re-throw to mark job as failed
+        }
+    }
+    
+    private function updateIngestJobStats(int $chunksCreated, int $errors): void
+    {
+        try {
+            $ingestJob = \App\Models\IngestJob::find($this->ingestJobId);
+            if (!$ingestJob) {
+                Log::warning('IngestJob not found for update', ['job_id' => $this->ingestJobId]);
+                return;
+            }
+            
+            $stats = $ingestJob->stats;
+            $stats['docs'] = ($stats['docs'] ?? 0) + ($chunksCreated > 0 ? 1 : 0);
+            $stats['chunks'] = ($stats['chunks'] ?? 0) + $chunksCreated;
+            $stats['errors'] = ($stats['errors'] ?? 0) + $errors;
+            $stats['pending_large_files'] = max(0, ($stats['pending_large_files'] ?? 0) - 1);
+            
+            // If no more large files pending, mark as completed
+            if ($stats['pending_large_files'] === 0) {
+                $ingestJob->status = 'completed';
+                $ingestJob->finished_at = now();
+                $stats['current_file'] = 'Completed';
+            } else {
+                $stats['current_file'] = "Processing {$stats['pending_large_files']} large file(s) in background...";
+            }
+            
+            $ingestJob->stats = $stats;
+            $ingestJob->save();
+            
+            Log::info('IngestJob stats updated from large file job', [
+                'ingest_job_id' => $this->ingestJobId,
+                'file_name' => $this->fileData['name'],
+                'pending_large_files' => $stats['pending_large_files'],
+                'status' => $ingestJob->status
+            ]);
+            
+        } catch (\Exception $e) {
+            Log::error('Failed to update IngestJob stats: ' . $e->getMessage());
+        }
+    }
+
+    public function failed(\Throwable $exception): void
+    {
+        Log::error('ProcessLargeFileJob failed permanently', [
+            'file_name' => $this->fileData['name'],
+            'error' => $exception->getMessage()
+        ]);
+        
+        // Update parent IngestJob with error
+        $this->updateIngestJobStats(0, 1);
+    }
+}
+

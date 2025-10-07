@@ -8,11 +8,13 @@ use App\Services\GoogleDriveService;
 use App\Services\FileUploadService;
 use App\Services\DocumentExtractionService;
 use App\Models\Document;
+use App\Jobs\ProcessLargeFileJob;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\Log;
 
 class IngestConnectorJob implements ShouldQueue
 {
@@ -30,18 +32,18 @@ class IngestConnectorJob implements ShouldQueue
 
     public function handle(): void
     {
-        \Log::info('=== IngestConnectorJob STARTED ===', [
+        Log::info('=== IngestConnectorJob STARTED ===', [
             'connector_id' => $this->connectorId,
             'org_id' => $this->orgId
         ]);
 
         $connector = Connector::find($this->connectorId);
         if (!$connector) {
-            \Log::error("Connector not found: {$this->connectorId}");
+            Log::error("Connector not found: {$this->connectorId}");
             return;
         }
 
-        \Log::info('Connector loaded', [
+        Log::info('Connector loaded', [
             'id' => $connector->id,
             'type' => $connector->type,
             'status' => $connector->status,
@@ -64,7 +66,7 @@ class IngestConnectorJob implements ShouldQueue
             ],
         ]);
 
-        \Log::info('IngestJob status set to running', ['job_id' => $job->id]);
+        Log::info('IngestJob status set to running', ['job_id' => $job->id]);
 
         $docs = 0; 
         $chunks = 0; 
@@ -74,37 +76,38 @@ class IngestConnectorJob implements ShouldQueue
 
         try {
             // Get tokens
-            $tokens = [];
-            if (!empty($connector->encrypted_tokens)) {
+        $tokens = [];
+        if (!empty($connector->encrypted_tokens)) {
                 try { 
                     $tokens = json_decode(decrypt($connector->encrypted_tokens), true) ?: []; 
-                    \Log::info('Tokens decrypted successfully', [
+                    Log::info('Tokens decrypted successfully', [
                         'has_access_token' => isset($tokens['access_token']),
                         'has_refresh_token' => isset($tokens['refresh_token'])
                     ]);
                 } catch (\Throwable $e) { 
-                    \Log::error("Error decrypting tokens: " . $e->getMessage());
+                    Log::error("Error decrypting tokens: " . $e->getMessage());
                     $tokens = []; 
                 }
             } else {
-                \Log::warning('No encrypted tokens found for connector', ['connector_id' => $connector->id]);
+                Log::warning('No encrypted tokens found for connector', ['connector_id' => $connector->id]);
             }
 
-            if ($connector->type === 'google_drive') {
-                \Log::info('Starting Google Drive file processing...');
-                $this->processGoogleDriveFiles($connector, $tokens, $job, $docs, $chunks, $errors, $processedFiles, $skippedFiles);
-                \Log::info('Google Drive file processing completed', [
-                    'docs' => $docs,
-                    'chunks' => $chunks,
-                    'errors' => $errors,
-                    'processed' => $processedFiles,
-                    'skipped' => $skippedFiles
-                ]);
-            }
+                    if ($connector->type === 'google_drive') {
+                        Log::info('Starting Google Drive file processing...');
+                        $largeFilesInfo = $this->processGoogleDriveFiles($connector, $tokens, $job, $docs, $chunks, $errors, $processedFiles, $skippedFiles);
+                        Log::info('Google Drive file processing completed', [
+                            'docs' => $docs,
+                            'chunks' => $chunks,
+                            'errors' => $errors,
+                            'processed' => $processedFiles,
+                            'skipped' => $skippedFiles,
+                            'large_files_pending' => count($largeFilesInfo)
+                        ]);
+                    }
             // TODO: Add other connector types here (e.g., Slack, Notion)
 
         } catch (\Throwable $e) {
-            \Log::error("Ingestion error: " . $e->getMessage(), [
+            Log::error("Ingestion error: " . $e->getMessage(), [
                 'exception' => get_class($e),
                 'trace' => $e->getTraceAsString()
             ]);
@@ -112,22 +115,41 @@ class IngestConnectorJob implements ShouldQueue
         }
 
         // Update job status
-        $job->status = 'completed';
-        $job->finished_at = now();
-        $job->stats = [
-            'docs' => $docs, 
-            'chunks' => $chunks, 
-            'errors' => $errors,
-            'total_files' => $job->stats['total_files'] ?? 0,
-            'processed_files' => $processedFiles,
-            'skipped_files' => $skippedFiles,
-            'current_file' => 'Completed',
-        ];
+        $pendingLargeFiles = count($largeFilesInfo ?? []);
+        
+        if ($pendingLargeFiles > 0) {
+            // If there are large files still processing, mark as 'processing_large_files'
+            $job->status = 'processing_large_files';
+            $job->stats = [
+                'docs' => $docs, 
+                'chunks' => $chunks, 
+                'errors' => $errors,
+                'total_files' => $job->stats['total_files'] ?? 0,
+                'processed_files' => $processedFiles,
+                'skipped_files' => $skippedFiles,
+                'pending_large_files' => $pendingLargeFiles,
+                'large_files' => $largeFilesInfo,
+                'current_file' => "Processing {$pendingLargeFiles} large file(s) in background...",
+            ];
+        } else {
+            // All files completed (no large files)
+            $job->status = 'completed';
+            $job->finished_at = now();
+            $job->stats = [
+                'docs' => $docs, 
+                'chunks' => $chunks, 
+                'errors' => $errors,
+                'total_files' => $job->stats['total_files'] ?? 0,
+                'processed_files' => $processedFiles,
+                'skipped_files' => $skippedFiles,
+                'current_file' => 'Completed',
+            ];
+        }
         $job->save();
 
-        \Log::info('IngestJob completed', [
+        Log::info('IngestJob completed', [
             'job_id' => $job->id,
-            'status' => 'completed',
+            'status' => $job->status,  // Use actual status (completed or processing_large_files)
             'stats' => $job->stats
         ]);
 
@@ -135,7 +157,7 @@ class IngestConnectorJob implements ShouldQueue
         $connector->last_synced_at = now();
         $connector->save();
 
-        \Log::info('=== IngestConnectorJob FINISHED ===', [
+        Log::info('=== IngestConnectorJob FINISHED ===', [
             'connector_id' => $connector->id,
             'total_docs' => $docs,
             'total_chunks' => $chunks,
@@ -146,21 +168,22 @@ class IngestConnectorJob implements ShouldQueue
 
     private function processGoogleDriveFiles($connector, $tokens, $job, &$docs, &$chunks, &$errors, &$processedFiles, &$skippedFiles)
     {
-        \Log::info('>>> processGoogleDriveFiles started', [
+        Log::info('>>> processGoogleDriveFiles started', [
             'connector_id' => $connector->id,
             'has_access_token' => !empty($tokens['access_token'])
         ]);
 
         $driveService = new \App\Services\GoogleDriveService();
         $extractor = new \App\Services\DocumentExtractionService();
+        $largeFiles = []; // Track large files dispatched to separate queue
 
         if (empty($tokens['access_token'])) {
-            \Log::error("No access token found for Google Drive connector");
+            Log::error("No access token found for Google Drive connector");
             $errors++;
             return;
         }
 
-        \Log::info('Checking and refreshing token if needed');
+        Log::info('Checking and refreshing token if needed');
         
         // Check if token needs refresh and refresh if expired
         try {
@@ -168,7 +191,7 @@ class IngestConnectorJob implements ShouldQueue
             
             if ($newToken) {
                 // Token was refreshed, save the new token
-                \Log::info('Saving refreshed token to database');
+                Log::info('Saving refreshed token to database');
                 $connector->encrypted_tokens = encrypt(json_encode($newToken));
                 $connector->save();
                 
@@ -176,23 +199,23 @@ class IngestConnectorJob implements ShouldQueue
                 $tokens = $newToken;
             }
         } catch (\Exception $e) {
-            \Log::error('Token refresh failed: ' . $e->getMessage());
+            Log::error('Token refresh failed: ' . $e->getMessage());
             $errors++;
             return;
         }
 
-        \Log::info('Setting access token for Google Drive service');
+        Log::info('Setting access token for Google Drive service');
         $driveService->setAccessToken($tokens);
 
         try {
-            \Log::info('Fetching file list from Google Drive...');
+            Log::info('Fetching file list from Google Drive...');
             // List files from Google Drive
             $results = $driveService->listFiles();
             $files = $results->getFiles();
 
             $totalFiles = count($files);
 
-            \Log::info("✅ Found " . $totalFiles . " files in Google Drive", [
+            Log::info("✅ Found " . $totalFiles . " files in Google Drive", [
                 'file_count' => $totalFiles
             ]);
 
@@ -206,7 +229,7 @@ class IngestConnectorJob implements ShouldQueue
 
             foreach ($files as $index => $file) {
                 try {
-                    \Log::info("Processing file #{$index}", [
+                    Log::info("Processing file #{$index}", [
                         'name' => $file->getName(),
                         'mime_type' => $file->getMimeType(),
                         'size' => $file->getSize(),
@@ -220,30 +243,88 @@ class IngestConnectorJob implements ShouldQueue
                     ]);
                     $job->save();
 
-                    // Skip very large files to prevent timeouts
+                    // Defer very large files to separate job (better timeout handling)
                     $fileSize = $file->getSize();
-                    if ($fileSize > 10 * 1024 * 1024) { // 10MB limit
-                        \Log::info("⏭️ Skipping large file: " . $file->getName(), [
+                    if ($fileSize > 10 * 1024 * 1024 && $fileSize <= 100 * 1024 * 1024) { // 10MB - 100MB
+                        Log::info("📦 Deferring large file to separate job: " . $file->getName(), [
                             'size' => $fileSize,
                             'size_mb' => round($fileSize / (1024 * 1024), 2) . ' MB'
+                        ]);
+                        
+                        // Track large file as pending
+                        $largeFiles[] = $file->getName();
+                        
+                        // Dispatch to dedicated large file processing job
+                        ProcessLargeFileJob::dispatch(
+                            $connector->id,
+                            $this->orgId,
+                            $job->id, // Pass the IngestJob ID so large file job can update it
+                            [
+                                'id' => $file->getId(),
+                                'name' => $file->getName(),
+                                'mime_type' => $file->getMimeType(),
+                                'size' => $fileSize,
+                                'web_view_link' => $file->getWebViewLink(),
+                            ],
+                            $tokens
+                        )->onQueue('large-files');
+                        
+                        $processedFiles++;
+                        continue;
+                    } elseif ($fileSize > 100 * 1024 * 1024) { // > 100MB - Skip entirely
+                        Log::info("⏭️ Skipping extremely large file: " . $file->getName(), [
+                            'size' => $fileSize,
+                            'size_mb' => round($fileSize / (1024 * 1024), 2) . ' MB',
+                            'reason' => 'File too large (>100MB) - consider using cloud processing service'
                         ]);
                         $skippedFiles++;
                         $processedFiles++;
                         continue;
                     }
 
-                    \Log::info("Fetching file content for: " . $file->getName());
+                    // OPTIMIZATION: Check if document exists BEFORE downloading
+                    // This saves bandwidth and processing time for unchanged files
+                    $existingDocument = \App\Models\Document::where('org_id', $this->orgId)
+                        ->where('connector_id', $connector->id)
+                        ->where('source_url', $file->getWebViewLink())
+                        ->first();
+
+                    // Google Drive provides MD5 hash in metadata (if available)
+                    $googleMd5 = $file->getMd5Checksum(); // May be null for some file types
+                    
+                    if ($existingDocument && $googleMd5) {
+                        // If we have an MD5 from Google Drive, use it for quick comparison
+                        // Convert our SHA256 to MD5 for comparison (or store MD5 in DB)
+                        // For now, we'll use a simpler approach: check modified time
+                        $googleModifiedTime = $file->getModifiedTime();
+                        $lastFetchedTime = $existingDocument->fetched_at;
+                        
+                        if ($googleModifiedTime && $lastFetchedTime && 
+                            strtotime($googleModifiedTime) <= strtotime($lastFetchedTime)) {
+                            Log::info("⏭️ Document unchanged (by modified time), skipping: " . $file->getName(), [
+                                'document_id' => $existingDocument->id,
+                                'google_modified' => $googleModifiedTime,
+                                'last_fetched' => $lastFetchedTime,
+                                'saved_bandwidth' => round($fileSize / 1024, 2) . ' KB'
+                            ]);
+                            $skippedFiles++;
+                            $processedFiles++;
+                            continue; // Skip download and processing entirely!
+                        }
+                    }
+
+                    Log::info("Fetching file content for: " . $file->getName());
                     // Get file content
                     $content = $driveService->getFileContent($file->getId(), $file->getMimeType());
-                    \Log::info("File content fetched", ['content_size' => strlen($content)]);
+                    Log::info("File content fetched", ['content_size' => strlen($content)]);
                     
-                    \Log::info("Extracting text from: " . $file->getName());
+                    Log::info("Extracting text from: " . $file->getName());
                     // Extract text
                     $text = $extractor->extractText($content, $file->getMimeType(), $file->getName());
-                    \Log::info("Text extracted", ['text_length' => strlen($text)]);
+                    Log::info("Text extracted", ['text_length' => strlen($text)]);
                     
                     if (empty(trim($text))) {
-                        \Log::info("⚠️ No text extracted from: " . $file->getName());
+                        Log::info("⚠️ No text extracted from: " . $file->getName());
                         $skippedFiles++;
                         $processedFiles++;
                         continue;
@@ -251,25 +332,19 @@ class IngestConnectorJob implements ShouldQueue
 
                     $contentHash = hash('sha256', $content);
 
-                    // Check if document already exists (by source URL or external ID)
-                    $existingDocument = \App\Models\Document::where('org_id', $this->orgId)
-                        ->where('connector_id', $connector->id)
-                        ->where('source_url', $file->getWebViewLink())
-                        ->first();
-
                     if ($existingDocument) {
-                        // Document exists - check if content has changed
+                        // Double-check with SHA256 hash after download
                         if ($existingDocument->sha256 === $contentHash) {
-                            \Log::info("⏭️ Document unchanged, skipping: " . $file->getName(), [
+                            Log::info("⏭️ Document unchanged (by hash), skipping: " . $file->getName(), [
                                 'document_id' => $existingDocument->id,
                                 'last_fetched' => $existingDocument->fetched_at
                             ]);
                             $skippedFiles++;
                             $processedFiles++;
-                            continue; // Skip processing if content hasn't changed
+                            continue; // Skip chunk creation if content hasn't changed
                         }
 
-                        \Log::info("🔄 Document changed, updating: " . $file->getName(), [
+                        Log::info("🔄 Document changed, updating: " . $file->getName(), [
                             'document_id' => $existingDocument->id,
                             'old_hash' => substr($existingDocument->sha256, 0, 8),
                             'new_hash' => substr($contentHash, 0, 8)
@@ -289,7 +364,7 @@ class IngestConnectorJob implements ShouldQueue
 
                         $document = $existingDocument;
                     } else {
-                        \Log::info("➕ Creating new document record for: " . $file->getName());
+                        Log::info("➕ Creating new document record for: " . $file->getName());
                         // Create new document record
                         $document = \App\Models\Document::create([
                             'id' => (string) \Illuminate\Support\Str::uuid(),
@@ -305,10 +380,10 @@ class IngestConnectorJob implements ShouldQueue
                         ]);
                     }
 
-                    \Log::info("Creating chunks for document: " . $file->getName());
+                    Log::info("Creating chunks for document: " . $file->getName());
                     // Create chunks
                     $textChunks = $extractor->chunkText($text);
-                    \Log::info("Text chunked", ['chunk_count' => count($textChunks)]);
+                    Log::info("Text chunked", ['chunk_count' => count($textChunks)]);
                     
                     foreach ($textChunks as $index => $chunkText) {
                         \App\Models\Chunk::create([
@@ -327,7 +402,7 @@ class IngestConnectorJob implements ShouldQueue
                     $docs++;
                     $processedFiles++;
                     
-                    \Log::info("✅ Processed document: " . $file->getName(), [
+                    Log::info("✅ Processed document: " . $file->getName(), [
                         'chunks_created' => count($textChunks),
                         'total_docs' => $docs,
                         'total_chunks' => $chunks,
@@ -343,10 +418,10 @@ class IngestConnectorJob implements ShouldQueue
                         'skipped_files' => $skippedFiles,
                         'current_file' => $file->getName(),
                     ]);
-                    $job->save();
+            $job->save();
 
                 } catch (\Exception $e) {
-                    \Log::error("❌ Error processing file: {$file->getName()}", [
+                    Log::error("❌ Error processing file: {$file->getName()}", [
                         'error' => $e->getMessage(),
                         'exception' => get_class($e),
                         'trace' => $e->getTraceAsString()
@@ -358,9 +433,12 @@ class IngestConnectorJob implements ShouldQueue
             }
 
         } catch (\Exception $e) {
-            \Log::error("Error listing Google Drive files: " . $e->getMessage());
+            Log::error("Error listing Google Drive files: " . $e->getMessage());
             $errors++;
         }
+        
+        // Return large files info for tracking
+        return $largeFiles;
     }
 }
 
