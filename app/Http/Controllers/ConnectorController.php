@@ -125,8 +125,21 @@ class ConnectorController extends Controller
 
     public function handleGoogleDriveCallback(Request $request)
     {
+        \Log::info('Google Drive OAuth callback called', [
+            'method' => $request->method(),
+            'query_params' => $request->query(),
+            'headers' => $request->headers->all()
+        ]);
+
         $code = (string) $request->query('code', '');
         $stateB64 = (string) $request->query('state', '');
+        
+        \Log::info('OAuth callback params', [
+            'code_length' => strlen($code),
+            'state_b64_length' => strlen($stateB64),
+            'has_code' => !empty($code),
+            'has_state' => !empty($stateB64)
+        ]);
         
         if ($code === '' || $stateB64 === '') {
             if ($request->isJson()) {
@@ -145,22 +158,13 @@ class ConnectorController extends Controller
             return redirect(env('FRONTEND_URL', 'http://localhost:3000') . '/connectors?error=invalid_state');
         }
 
-        // For GET requests, we need to authenticate the user differently
-        if ($request->isMethod('GET')) {
-            // Get the user from the connector's organization
-            $connector = Connector::find($connectorId);
-            if (!$connector) {
-                return redirect(env('FRONTEND_URL', 'http://localhost:3000') . '/connectors?error=connector_not_found');
+        // Find the connector
+        $connector = Connector::find($connectorId);
+        if (!$connector) {
+            if ($request->isJson()) {
+                return response()->json(['message' => 'Connector not found'], 404);
             }
-            
-            $user = \App\Models\User::where('org_id', $connector->org_id)->first();
-            if (!$user) {
-                return redirect(env('FRONTEND_URL', 'http://localhost:3000') . '/connectors?error=user_not_found');
-            }
-        } else {
-            $connector = Connector::where('id', $connectorId)
-                ->where('org_id', $request->user()->org_id)
-                ->firstOrFail();
+            return redirect(env('FRONTEND_URL', 'http://localhost:3000') . '/connectors?error=connector_not_found');
         }
 
         $client = new GoogleClient();
@@ -169,7 +173,16 @@ class ConnectorController extends Controller
         $client->setRedirectUri(env('GOOGLE_REDIRECT_URI'));
 
         $token = $client->fetchAccessTokenWithAuthCode($code);
+        
+        \Log::info('Token exchange result', [
+            'has_error' => isset($token['error']),
+            'error' => $token['error'] ?? null,
+            'has_access_token' => isset($token['access_token']),
+            'has_refresh_token' => isset($token['refresh_token'])
+        ]);
+        
         if (isset($token['error'])) {
+            \Log::error('OAuth token exchange failed', ['error' => $token['error']]);
             if ($request->isJson()) {
                 return response()->json(['message' => 'OAuth error', 'error' => $token['error']], 400);
             }
@@ -180,12 +193,14 @@ class ConnectorController extends Controller
         $connector->status = 'connected';
         $connector->save();
 
+        \Log::info('Connector updated successfully', [
+            'connector_id' => $connector->id,
+            'status' => $connector->status,
+            'has_tokens' => !empty($connector->encrypted_tokens)
+        ]);
+
         // Optionally kick off ingestion immediately
-        if ($request->isMethod('POST')) {
-            IngestConnectorJob::dispatch($connector->id, $request->user()->org_id)->onQueue('default');
-        } else {
-            IngestConnectorJob::dispatch($connector->id, $connector->org_id)->onQueue('default');
-        }
+        IngestConnectorJob::dispatch($connector->id, $connector->org_id)->onQueue('default');
 
         if ($request->isJson()) {
             return response()->json([

@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\AuthController;
+use App\Http\Controllers\ConnectorController;
 use App\Http\Controllers\PasswordResetController;
 use App\Http\Controllers\ProfileController;
 use Illuminate\Support\Facades\Route;
@@ -8,6 +9,11 @@ use Illuminate\Support\Facades\Route;
 Route::get('/', function () {
     return view('welcome');
 });
+
+
+
+Route::get('connectors/google-drive/callback', [ConnectorController::class, 'handleGoogleDriveCallback']);
+Route::post('connectors/google-drive/callback', [ConnectorController::class, 'handleGoogleDriveCallback']);
 
 
 

@@ -2,80 +2,120 @@
 
 namespace App\Services;
 
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
+
 class DocumentExtractionService
 {
-    /**
-     * Very basic extraction stub. For PDFs/Docx integrate a real parser later.
-     */
-    public function extractText(string $localPath, ?string $mimeType = null): string
+    public function extractText($content, $mimeType, $filename = null)
     {
-        if ($mimeType === 'text/plain' || (is_readable($localPath) && preg_match('/\.txt$/i', $localPath))) {
-            return (string) file_get_contents($localPath);
+        try {
+            return match (true) {
+                str_contains($mimeType, 'text/plain') => $this->extractPlainText($content),
+                str_contains($mimeType, 'text/html') => $this->extractHtmlText($content),
+                str_contains($mimeType, 'text/csv') => $this->extractCsvText($content),
+                str_contains($mimeType, 'application/pdf') => $this->extractPdfText($content),
+                str_contains($mimeType, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') => $this->extractDocxText($content),
+                str_contains($mimeType, 'application/msword') => $this->extractDocText($content),
+                str_contains($mimeType, 'application/vnd.google-apps.') => $content, // Already extracted as text
+                default => $this->extractPlainText($content)
+            };
+        } catch (\Exception $e) {
+            Log::error("Error extracting text from {$filename} (type: {$mimeType}): " . $e->getMessage());
+            return "Error extracting text from this file: " . $e->getMessage();
         }
-        // DOCX
-        if ($mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' || preg_match('/\.docx$/i', $localPath)) {
-            $text = $this->extractFromDocx($localPath);
-            return $text ?? '';
-        }
-        // PDF
-        if ($mimeType === 'application/pdf' || preg_match('/\.pdf$/i', $localPath)) {
-            $text = $this->extractFromPdf($localPath);
-            return $text ?? '';
-        }
-        // Fallback: unknown types return empty for now
-        return '';
     }
 
-    private function extractFromDocx(string $localPath): ?string
+    private function extractPlainText($content)
     {
-        if (!is_readable($localPath)) return null;
-        $zip = new \ZipArchive();
-        if ($zip->open($localPath) === true) {
-            $index = $zip->locateName('word/document.xml');
-            if ($index !== false) {
-                $xml = $zip->getFromIndex($index);
-                $zip->close();
-                if ($xml !== false) {
-                    // Replace paragraph and break tags with newlines, strip remaining tags
-                    $xml = preg_replace('/<w:p[\s\S]*?>/i', "\n", $xml);
-                    $xml = preg_replace('/<w:br\s*\/>/i', "\n", $xml);
-                    $text = strip_tags($xml);
-                    // Normalize whitespace
-                    $text = preg_replace("/\r\n|\r|\n/", "\n", $text);
-                    $text = preg_replace('/\n{3,}/', "\n\n", $text);
-                    return trim($text);
-                }
+        return trim($content);
+    }
+
+    private function extractHtmlText($content)
+    {
+        // Remove HTML tags and decode entities
+        $text = strip_tags($content);
+        $text = html_entity_decode($text, ENT_QUOTES, 'UTF-8');
+        return trim($text);
+    }
+
+    private function extractCsvText($content)
+    {
+        // Convert CSV to readable text
+        $lines = explode("\n", $content);
+        $text = '';
+        
+        foreach ($lines as $line) {
+            if (trim($line)) {
+                $text .= $line . "\n";
+            }
+        }
+        
+        return trim($text);
+    }
+
+    private function extractPdfText($content)
+    {
+        // For PDF extraction, you would typically use a library like Smalot\PdfParser
+        // For now, return a placeholder - you can implement PDF extraction later
+        return "PDF content extraction not implemented yet. File size: " . strlen($content) . " bytes";
+    }
+
+    private function extractDocxText($content)
+    {
+        // For DOCX extraction, you would typically use PhpOffice\PhpWord
+        // For now, return a placeholder
+        return "DOCX content extraction not implemented yet. File size: " . strlen($content) . " bytes";
+    }
+
+    private function extractDocText($content)
+    {
+        // For DOC extraction, you would need a specialized library
+        return "DOC content extraction not implemented yet. File size: " . strlen($content) . " bytes";
+    }
+
+    public function chunkText($text, $chunkSize = 2000, $overlap = 200)
+    {
+        if (strlen($text) <= $chunkSize) {
+            return [$text];
+        }
+
+        $chunks = [];
+        $start = 0;
+        $textLength = strlen($text);
+
+        while ($start < $textLength) {
+            $end = $start + $chunkSize;
+            
+            if ($end >= $textLength) {
+                $chunks[] = substr($text, $start);
+                break;
+            }
+
+            // Try to break at sentence boundary
+            $chunk = substr($text, $start, $chunkSize);
+            $lastSentence = strrpos($chunk, '. ');
+            
+            if ($lastSentence !== false && $lastSentence > $chunkSize * 0.7) {
+                $end = $start + $lastSentence + 1;
+                $chunks[] = trim(substr($text, $start, $lastSentence + 1));
             } else {
-                $zip->close();
+                // Fall back to word boundary
+                $lastSpace = strrpos($chunk, ' ');
+                if ($lastSpace !== false && $lastSpace > $chunkSize * 0.7) {
+                    $end = $start + $lastSpace;
+                    $chunks[] = trim(substr($text, $start, $lastSpace));
+                } else {
+                    $chunks[] = trim($chunk);
+                }
             }
-        }
-        return null;
-    }
 
-    private function extractFromPdf(string $localPath): ?string
-    {
-        if (!is_readable($localPath)) return null;
-        // If Smalot\PdfParser is installed, use it
-        if (class_exists('Smalot\\PdfParser\\Parser')) {
-            try {
-                $parser = new \Smalot\PdfParser\Parser();
-                $pdf = $parser->parseFile($localPath);
-                return trim($pdf->getText());
-            } catch (\Throwable $e) {
-                return null;
-            }
+            $start = $end - $overlap;
+            if ($start < 0) $start = 0;
         }
-        // Try system pdftotext if available
-        $tmpTxt = $localPath . '.txt';
-        $cmd = 'pdftotext ' . escapeshellarg($localPath) . ' ' . escapeshellarg($tmpTxt);
-        @exec($cmd, $out, $code);
-        if (is_readable($tmpTxt)) {
-            $text = (string) @file_get_contents($tmpTxt);
-            @unlink($tmpTxt);
-            if (!empty($text)) return trim($text);
-        }
-        return null;
+
+        return array_filter($chunks, function($chunk) {
+            return !empty(trim($chunk));
+        });
     }
 }
-
-
