@@ -4,6 +4,8 @@ namespace App\Http\Controllers;
 
 use App\Models\Chunk;
 use App\Models\Document;
+use App\Models\Conversation;
+use App\Models\Message;
 use App\Services\EmbeddingService;
 use App\Services\VectorStoreService;
 use App\Services\RAGService;
@@ -17,13 +19,37 @@ class ChatController extends Controller
         $user = $request->user();
         $orgId = $user->org_id;
         
-        $request->validate([
+        $validated = $request->validate([
             'query' => 'required|string',
+            'conversation_id' => 'nullable|string|uuid',
             'top_k' => 'nullable|integer|min:1|max:50'
         ]);
 
-        $queryText = $request->input('query');
-        $topK = $request->input('top_k', 6);
+        $queryText = $validated['query'];
+        $topK = $validated['top_k'] ?? 6;
+        $conversationId = $validated['conversation_id'] ?? null;
+
+        // Get or create conversation
+        if ($conversationId) {
+            $conversation = Conversation::where('id', $conversationId)
+                ->where('user_id', $user->id)
+                ->firstOrFail();
+        } else {
+            // Create new conversation
+            $conversation = Conversation::create([
+                'org_id' => $orgId,
+                'user_id' => $user->id,
+                'title' => mb_substr($queryText, 0, 50), // Use first query as title
+                'last_message_at' => now(),
+            ]);
+        }
+
+        // Save user message
+        Message::create([
+            'conversation_id' => $conversation->id,
+            'role' => 'user',
+            'content' => $queryText,
+        ]);
 
         try {
             // 1. Create embedding for query
@@ -73,20 +99,29 @@ class ChatController extends Controller
             $prompt = $rag->assemblePrompt($queryText, $snippets);
             $llmResponse = $rag->callLLM($prompt);
 
-            // 5. Format sources for response
-            $formattedSources = array_map(function($s) use ($chunks) {
-                $chunk = $chunks[$s['chunk_id']] ?? null;
-                return [
-                    'chunk_id' => $s['chunk_id'],
-                    'document_id' => $s['document_id'],
-                    'title' => $chunk && $chunk->document ? $chunk->document->title : 'Unknown',
-                    'url' => $chunk && $chunk->document ? $chunk->document->source_url : null,
-                    'excerpt' => mb_substr($s['text'], 0, 800),
-                    'char_start' => $s['char_start'],
-                    'char_end' => $s['char_end'],
-                    'score' => $s['score'] ?? null
+            // Parse the LLM response (it returns JSON with answer + sources)
+            $parsedAnswer = json_decode($llmResponse['answer'] ?? '{}', true);
+            $answerText = is_array($parsedAnswer) ? ($parsedAnswer['answer'] ?? $llmResponse['answer']) : $llmResponse['answer'];
+            $llmSources = is_array($parsedAnswer) ? ($parsedAnswer['sources'] ?? []) : [];
+
+            // 5. Format sources with full details (title, URL, excerpt)
+            // Map the LLM's numbered sources back to actual chunks
+            $formattedSources = [];
+            foreach ($snippets as $idx => $snippet) {
+                $chunk = $chunks[$snippet['chunk_id']] ?? null;
+                if (!$chunk || !$chunk->document) continue;
+
+                $formattedSources[] = [
+                    'chunk_id' => $snippet['chunk_id'],
+                    'document_id' => $snippet['document_id'],
+                    'title' => $chunk->document->title,
+                    'url' => $chunk->document->source_url,
+                    'excerpt' => mb_substr($snippet['text'], 0, 300),
+                    'char_start' => $snippet['char_start'],
+                    'char_end' => $snippet['char_end'],
+                    'score' => $snippet['score'] ?? null
                 ];
-            }, $snippets);
+            }
 
             // Log the query for analytics
             \App\Models\QueryLog::create([
@@ -99,11 +134,23 @@ class ChatController extends Controller
                 'timestamp' => now(),
             ]);
 
+            // Save assistant message
+            Message::create([
+                'conversation_id' => $conversation->id,
+                'role' => 'assistant',
+                'content' => $answerText,
+                'sources' => $formattedSources,
+            ]);
+
+            // Update conversation's last message time
+            $conversation->update(['last_message_at' => now()]);
+
             return response()->json([
-                'answer' => $llmResponse['answer'] ?? null,
+                'answer' => $answerText,
                 'sources' => $formattedSources,
                 'query' => $queryText,
                 'result_count' => count($formattedSources),
+                'conversation_id' => $conversation->id,
                 'raw' => $llmResponse['raw'] ?? null
             ]);
 
@@ -181,6 +228,67 @@ class ChatController extends Controller
         return response()->json([
             'message' => 'Feedback recorded successfully'
         ]);
+    }
+
+    // Conversation Management
+    public function getConversations(Request $request)
+    {
+        $user = $request->user();
+        
+        $conversations = Conversation::where('user_id', $user->id)
+            ->orderBy('last_message_at', 'desc')
+            ->with(['messages' => function($q) {
+                $q->orderBy('created_at', 'desc')->limit(1);
+            }])
+            ->get();
+
+        return response()->json($conversations->map(function($conv) {
+            $lastMessage = $conv->messages->first();
+            return [
+                'id' => $conv->id,
+                'title' => $conv->title,
+                'last_message' => $lastMessage ? $lastMessage->content : null,
+                'last_message_at' => $conv->last_message_at,
+                'created_at' => $conv->created_at,
+            ];
+        }));
+    }
+
+    public function getConversation(Request $request, $id)
+    {
+        $user = $request->user();
+        
+        $conversation = Conversation::where('id', $id)
+            ->where('user_id', $user->id)
+            ->with('messages')
+            ->firstOrFail();
+
+        return response()->json([
+            'id' => $conversation->id,
+            'title' => $conversation->title,
+            'messages' => $conversation->messages->map(function($msg) {
+                return [
+                    'id' => $msg->id,
+                    'role' => $msg->role,
+                    'content' => $msg->content,
+                    'sources' => $msg->sources,
+                    'created_at' => $msg->created_at,
+                ];
+            }),
+        ]);
+    }
+
+    public function deleteConversation(Request $request, $id)
+    {
+        $user = $request->user();
+        
+        $conversation = Conversation::where('id', $id)
+            ->where('user_id', $user->id)
+            ->firstOrFail();
+
+        $conversation->delete();
+
+        return response()->json(['message' => 'Conversation deleted successfully']);
     }
 
 

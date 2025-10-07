@@ -66,6 +66,11 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('chat', [ChatController::class, 'ask']);
     Route::post('search', [ChatController::class, 'search']);
     Route::post('feedback', [ChatController::class, 'feedback']);
+    
+    // Conversations
+    Route::get('conversations', [ChatController::class, 'getConversations']);
+    Route::get('conversations/{id}', [ChatController::class, 'getConversation']);
+    Route::delete('conversations/{id}', [ChatController::class, 'deleteConversation']);
 
     // Connectors
     Route::get('orgs/{org}/connectors', [ConnectorController::class, 'index']);
