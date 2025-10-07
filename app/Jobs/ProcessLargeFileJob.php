@@ -139,8 +139,9 @@ class ProcessLargeFileJob implements ShouldQueue
                 'chunk_count' => count($textChunks)
             ]);
 
+            $createdChunks = [];
             foreach ($textChunks as $index => $chunkText) {
-                Chunk::create([
+                $chunk = Chunk::create([
                     'id' => (string) Str::uuid(),
                     'org_id' => $this->orgId,
                     'document_id' => $document->id,
@@ -150,6 +151,15 @@ class ProcessLargeFileJob implements ShouldQueue
                     'char_end' => ($index + 1) * 2000,
                     'token_count' => str_word_count($chunkText),
                 ]);
+                $createdChunks[] = $chunk;
+            }
+
+            // Generate embeddings and upload to Pinecone
+            if (!empty($createdChunks)) {
+                Log::info('Generating embeddings for large file chunks', [
+                    'chunk_count' => count($createdChunks)
+                ]);
+                $this->generateAndUploadEmbeddings($createdChunks);
             }
 
             Log::info('✅ Large file processed successfully', [
@@ -222,6 +232,70 @@ class ProcessLargeFileJob implements ShouldQueue
         
         // Update parent IngestJob with error
         $this->updateIngestJobStats(0, 1);
+    }
+
+    /**
+     * Generate embeddings for chunks and upload to Pinecone
+     */
+    private function generateAndUploadEmbeddings(array $chunks): void
+    {
+        try {
+            $embeddingService = app(\App\Services\EmbeddingService::class);
+            $vectorStore = app(\App\Services\VectorStoreService::class);
+
+            // Batch process chunks (100 at a time for OpenAI API limits)
+            $batchSize = 100;
+            $batches = array_chunk($chunks, $batchSize);
+
+            foreach ($batches as $batchIndex => $batch) {
+                Log::info("Processing embedding batch for large file", [
+                    'batch' => $batchIndex + 1,
+                    'total_batches' => count($batches),
+                    'batch_size' => count($batch)
+                ]);
+
+                // Extract texts for batch embedding
+                $texts = array_map(fn($chunk) => $chunk->text, $batch);
+                
+                // Generate embeddings in batch
+                $embeddings = $embeddingService->embedBatch($texts);
+
+                // Prepare vectors for Pinecone
+                $vectors = [];
+                foreach ($batch as $idx => $chunk) {
+                    $vectors[] = [
+                        'id' => (string) $chunk->id,
+                        'values' => $embeddings[$idx],
+                        'metadata' => [
+                            'chunk_id' => $chunk->id,
+                            'document_id' => $chunk->document_id,
+                            'org_id' => $chunk->org_id,
+                        ]
+                    ];
+                }
+
+                // Upsert to Pinecone with org_id as namespace
+                $vectorStore->upsert($vectors, $this->orgId);
+
+                Log::info("✅ Batch uploaded to Pinecone (large file)", [
+                    'batch' => $batchIndex + 1,
+                    'vectors_count' => count($vectors)
+                ]);
+            }
+
+            Log::info("🎉 All embeddings generated for large file", [
+                'file' => $this->fileData['name'],
+                'total_chunks' => count($chunks),
+                'total_batches' => count($batches)
+            ]);
+
+        } catch (\Exception $e) {
+            Log::error("❌ Error generating embeddings for large file: " . $e->getMessage(), [
+                'file' => $this->fileData['name'],
+                'trace' => $e->getTraceAsString()
+            ]);
+            // Don't throw - allow processing to complete even if embeddings fail
+        }
     }
 }
 

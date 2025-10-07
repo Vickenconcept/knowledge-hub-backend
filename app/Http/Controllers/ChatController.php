@@ -4,74 +4,113 @@ namespace App\Http\Controllers;
 
 use App\Models\Chunk;
 use App\Models\Document;
+use App\Services\EmbeddingService;
+use App\Services\VectorStoreService;
+use App\Services\RAGService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 
 class ChatController extends Controller
 {
-    public function ask(Request $request)
+    public function ask(Request $request, EmbeddingService $embeddingService, VectorStoreService $vectorStore, RAGService $rag)
     {
-        $validated = $request->validate([
-            'query' => 'required|string|max:1000',
-            'history' => 'nullable|array',
-            'top_k' => 'nullable|integer|min:1|max:20'
+        $user = $request->user();
+        $orgId = $user->org_id;
+        
+        $request->validate([
+            'query' => 'required|string',
+            'top_k' => 'nullable|integer|min:1|max:50'
         ]);
 
-        $orgId = $request->user()->org_id;
-        $query = $validated['query'];
-        $topK = $validated['top_k'] ?? 5;
+        $queryText = $request->input('query');
+        $topK = $request->input('top_k', 6);
 
         try {
-            // For now, do a simple text search across chunks
-            // Later we'll implement vector search with embeddings
-            $chunks = Chunk::whereHas('document', function($q) use ($orgId) {
-                $q->where('org_id', $orgId);
-            })
-            ->where('text', 'like', '%' . $query . '%')
-            ->with(['document' => function($q) {
-                $q->select('id', 'title', 'source_url', 'org_id');
-            }])
-            ->limit($topK)
-            ->get();
+            // 1. Create embedding for query
+            $embedding = $embeddingService->embed($queryText);
 
-            // Generate a simple response based on found chunks
-            $answer = $this->generateAnswer($query, $chunks);
-            
-            // Format sources
-            $sources = $chunks->map(function($chunk) use ($query) {
-                return [
-                    'document_id' => $chunk->document->id,
-                    'title' => $chunk->document->title,
-                    'url' => $chunk->document->source_url,
-                    'excerpt' => $this->extractExcerpt($chunk->text, $query),
-                    'char_start' => $chunk->char_start,
-                    'char_end' => $chunk->char_end,
-                    'score' => 1.0 // Placeholder score
+            // 2. Query vector store for nearest chunks
+            $matches = $vectorStore->query($embedding, $topK, $orgId);
+
+            // matches expected: array of ['id' => chunk_id, 'score' => float, 'metadata' => [...] ]
+            $chunkIds = array_map(fn($m) => $m['id'], $matches);
+
+            if (empty($chunkIds)) {
+                return response()->json([
+                    'answer' => "I don't know — no relevant documents found.",
+                    'sources' => [],
+                    'query' => $queryText,
+                    'result_count' => 0,
+                    'raw' => null
+                ]);
+            }
+
+            // 3. Fetch chunk rows
+            $chunks = Chunk::whereIn('id', $chunkIds)
+                ->with(['document' => function($q) {
+                    $q->select('id', 'title', 'source_url', 'org_id');
+                }])
+                ->get()
+                ->keyBy('id');
+
+            // Build an ordered snippets array based on matches
+            $snippets = [];
+            foreach ($matches as $m) {
+                $cid = $m['id'];
+                if (!isset($chunks[$cid])) continue;
+                $c = $chunks[$cid];
+                $snippets[] = [
+                    'chunk_id' => $c->id,
+                    'document_id' => $c->document_id,
+                    'text' => $c->text,
+                    'char_start' => $c->char_start,
+                    'char_end' => $c->char_end,
+                    'score' => $m['score'],
                 ];
-            })->toArray();
+            }
+
+            // 4. Assemble prompt & call LLM
+            $prompt = $rag->assemblePrompt($queryText, $snippets);
+            $llmResponse = $rag->callLLM($prompt);
+
+            // 5. Format sources for response
+            $formattedSources = array_map(function($s) use ($chunks) {
+                $chunk = $chunks[$s['chunk_id']] ?? null;
+                return [
+                    'chunk_id' => $s['chunk_id'],
+                    'document_id' => $s['document_id'],
+                    'title' => $chunk && $chunk->document ? $chunk->document->title : 'Unknown',
+                    'url' => $chunk && $chunk->document ? $chunk->document->source_url : null,
+                    'excerpt' => mb_substr($s['text'], 0, 800),
+                    'char_start' => $s['char_start'],
+                    'char_end' => $s['char_end'],
+                    'score' => $s['score'] ?? null
+                ];
+            }, $snippets);
 
             // Log the query for analytics
             \App\Models\QueryLog::create([
                 'id' => (string) \Illuminate\Support\Str::uuid(),
                 'org_id' => $orgId,
-                'user_id' => $request->user()->id,
-                'query_text' => $query,
+                'user_id' => $user->id,
+                'query_text' => $queryText,
                 'top_k' => $topK,
-                'result_count' => count($sources),
+                'result_count' => count($formattedSources),
                 'timestamp' => now(),
             ]);
 
-                return response()->json([
-                'answer' => $answer,
-                'sources' => $sources,
-                'query' => $query,
-                'result_count' => count($sources)
+            return response()->json([
+                'answer' => $llmResponse['answer'] ?? null,
+                'sources' => $formattedSources,
+                'query' => $queryText,
+                'result_count' => count($formattedSources),
+                'raw' => $llmResponse['raw'] ?? null
             ]);
 
         } catch (\Exception $e) {
-            Log::error('Chat error: ' . $e->getMessage());
+            Log::error('ChatController@ask error: ' . $e->getMessage(), ['trace' => $e->getTraceAsString()]);
             return response()->json([
-                'error' => 'Failed to process query',
+                'error' => 'Internal server error',
                 'message' => $e->getMessage()
             ], 500);
         }
@@ -144,31 +183,6 @@ class ChatController extends Controller
         ]);
     }
 
-    private function generateAnswer($query, $chunks)
-    {
-        if ($chunks->isEmpty()) {
-            return "I couldn't find any relevant information about '{$query}' in your documents. Try searching for different keywords or check if your documents have been properly indexed.";
-        }
-
-        // Simple answer generation based on found chunks
-        $relevantText = $chunks->pluck('text')->join(' ');
-        
-        // Extract a relevant sentence or paragraph
-        $sentences = explode('.', $relevantText);
-        $relevantSentences = array_filter($sentences, function($sentence) use ($query) {
-            return stripos($sentence, $query) !== false;
-        });
-
-        if (!empty($relevantSentences)) {
-            // Get the first element (array_filter preserves keys, so use array_values or reset)
-            $answer = trim(array_values($relevantSentences)[0]) . '.';
-        } else {
-            // Fallback to first chunk
-            $answer = substr($chunks->first()->text, 0, 200) . '...';
-        }
-
-        return $answer . "\n\nI found " . count($chunks) . " relevant document(s) that contain information about your query.";
-    }
 
     private function extractExcerpt($text, $query, $contextLength = 150)
     {
