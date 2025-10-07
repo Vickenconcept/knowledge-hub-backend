@@ -297,11 +297,26 @@ class ChatController extends Controller
     {
         $user = $request->user();
         
+        Log::info('Delete conversation request', [
+            'conversation_id' => $id,
+            'user_id' => $user->id,
+        ]);
+        
         $conversation = Conversation::where('id', $id)
             ->where('user_id', $user->id)
-            ->firstOrFail();
+            ->first();
+
+        if (!$conversation) {
+            Log::warning('Conversation not found or unauthorized', [
+                'conversation_id' => $id,
+                'user_id' => $user->id,
+            ]);
+            return response()->json(['error' => 'Conversation not found'], 404);
+        }
 
         $conversation->delete();
+        
+        Log::info('Conversation deleted successfully', ['conversation_id' => $id]);
 
         return response()->json(['message' => 'Conversation deleted successfully']);
     }
