@@ -17,8 +17,10 @@
         "laravel/sanctum": "^4.0",
         "laravel/tinker": "^2.10.1",
         "livewire/livewire": "^3.6",
+        "smalot/pdfparser": "^2.12",
         "spatie/laravel-permission": "^6.20",
-        "spatie/laravel-sluggable": "^3.7"
+        "spatie/laravel-sluggable": "^3.7",
+        "spatie/pdf-to-text": "^1.54"
     },
     "require-dev": {
         "fakerphp/faker": "^1.23",

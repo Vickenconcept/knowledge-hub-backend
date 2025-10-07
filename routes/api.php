@@ -72,6 +72,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('orgs/{org}/connectors', [ConnectorController::class, 'create']);
     Route::post('connectors/{id}/oauth/callback', [ConnectorController::class, 'oauthCallback']);
     Route::post('connectors/{id}/start-ingest', [ConnectorController::class, 'startIngest']);
+    Route::get('connectors/{connectorId}/job-status', [ConnectorController::class, 'getJobStatus']);
 
     // Google Drive OAuth
     Route::get('connectors/google-drive/auth-url', [ConnectorController::class, 'getGoogleDriveAuthUrl']);

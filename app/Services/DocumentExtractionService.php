@@ -56,9 +56,60 @@ class DocumentExtractionService
 
     private function extractPdfText($content)
     {
-        // For PDF extraction, you would typically use a library like Smalot\PdfParser
-        // For now, return a placeholder - you can implement PDF extraction later
-        return "PDF content extraction not implemented yet. File size: " . strlen($content) . " bytes";
+        \Log::info('Attempting PDF text extraction', ['content_length' => strlen($content)]);
+        
+        try {
+            // Save content to temporary file (required by pdftotext)
+            $tempPdfPath = sys_get_temp_dir() . '/' . uniqid('pdf_') . '.pdf';
+            file_put_contents($tempPdfPath, $content);
+            
+            // Try using Spatie's pdf-to-text (best option - uses pdftotext)
+            if (class_exists('\Spatie\PdfToText\Pdf')) {
+                try {
+                    $text = \Spatie\PdfToText\Pdf::getText($tempPdfPath);
+                    unlink($tempPdfPath);
+                    
+                    if (!empty(trim($text))) {
+                        \Log::info('PDF text extracted successfully with pdftotext', ['text_length' => strlen($text)]);
+                        return trim($text);
+                    }
+                } catch (\Exception $e) {
+                    \Log::warning('pdftotext extraction failed, trying fallback: ' . $e->getMessage());
+                }
+            }
+            
+            // Fallback: Try Smalot PDFParser if pdftotext isn't available
+            if (class_exists('\Smalot\PdfParser\Parser')) {
+                try {
+                    $parser = new \Smalot\PdfParser\Parser();
+                    $pdf = $parser->parseContent($content);
+                    $text = $pdf->getText();
+                    unlink($tempPdfPath);
+                    
+                    if (!empty(trim($text))) {
+                        \Log::info('PDF text extracted successfully with Smalot parser', ['text_length' => strlen($text)]);
+                        // Clean up problematic characters
+                        $text = $this->sanitizeText($text);
+                        return trim($text);
+                    }
+                } catch (\Exception $e) {
+                    \Log::warning('Smalot parser extraction failed: ' . $e->getMessage());
+                }
+            }
+            
+            // Clean up temp file if still exists
+            if (file_exists($tempPdfPath)) {
+                unlink($tempPdfPath);
+            }
+            
+            // If all methods fail, log and return empty
+            \Log::error('All PDF extraction methods failed');
+            return '';
+            
+        } catch (\Exception $e) {
+            \Log::error('PDF extraction error: ' . $e->getMessage());
+            return '';
+        }
     }
 
     private function extractDocxText($content)
@@ -74,8 +125,28 @@ class DocumentExtractionService
         return "DOC content extraction not implemented yet. File size: " . strlen($content) . " bytes";
     }
 
+    private function sanitizeText(string $text): string
+    {
+        // Remove null bytes and other problematic characters
+        $text = str_replace("\0", '', $text);
+        
+        // Fix UTF-8 encoding issues
+        $text = mb_convert_encoding($text, 'UTF-8', 'UTF-8');
+        
+        // Remove invalid UTF-8 sequences
+        $text = iconv('UTF-8', 'UTF-8//IGNORE', $text);
+        
+        // Remove 4-byte UTF-8 characters (emojis, special symbols) that might cause issues
+        $text = preg_replace('/[\x{10000}-\x{10FFFF}]/u', '', $text);
+        
+        return $text;
+    }
+
     public function chunkText($text, $chunkSize = 2000, $overlap = 200)
     {
+        // Sanitize text before chunking
+        $text = $this->sanitizeText($text);
+        
         if (strlen($text) <= $chunkSize) {
             return [$text];
         }

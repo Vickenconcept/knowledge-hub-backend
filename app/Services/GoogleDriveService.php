@@ -35,6 +35,51 @@ class GoogleDriveService
         $this->client->setAccessToken($accessToken);
     }
 
+    public function refreshTokenIfNeeded($tokens)
+    {
+        Log::info('Checking token expiration', [
+            'has_access_token' => isset($tokens['access_token']),
+            'has_refresh_token' => isset($tokens['refresh_token']),
+            'expires_in' => $tokens['expires_in'] ?? 'not set'
+        ]);
+
+        // Set the full token array (including refresh token)
+        $this->client->setAccessToken($tokens);
+
+        // Check if token is expired or will expire soon
+        if ($this->client->isAccessTokenExpired()) {
+            Log::info('Access token expired, refreshing...', [
+                'refresh_token_available' => !empty($tokens['refresh_token'])
+            ]);
+            
+            if (empty($tokens['refresh_token'])) {
+                throw new \Exception('No refresh token available. User needs to re-authenticate.');
+            }
+
+            try {
+                // Refresh the token
+                $newToken = $this->client->fetchAccessTokenWithRefreshToken($tokens['refresh_token']);
+                
+                if (isset($newToken['error'])) {
+                    Log::error('Token refresh failed', ['error' => $newToken['error']]);
+                    throw new \Exception('Failed to refresh token: ' . $newToken['error']);
+                }
+                
+                Log::info('Access token refreshed successfully', [
+                    'has_new_access_token' => isset($newToken['access_token']),
+                    'new_expires_in' => $newToken['expires_in'] ?? 'not set'
+                ]);
+                return $newToken; // Return new token to save in DB
+            } catch (\Exception $e) {
+                Log::error('Exception during token refresh: ' . $e->getMessage());
+                throw $e;
+            }
+        }
+
+        Log::info('Access token is still valid, no refresh needed');
+        return null; // Token is still valid, no refresh needed
+    }
+
     public function listFiles($pageToken = null, $maxResults = 100)
     {
         try {
