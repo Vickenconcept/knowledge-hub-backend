@@ -38,7 +38,7 @@ class ChatController extends Controller
             $answer = $this->generateAnswer($query, $chunks);
             
             // Format sources
-            $sources = $chunks->map(function($chunk) {
+            $sources = $chunks->map(function($chunk) use ($query) {
                 return [
                     'document_id' => $chunk->document->id,
                     'title' => $chunk->document->title,
@@ -160,7 +160,8 @@ class ChatController extends Controller
         });
 
         if (!empty($relevantSentences)) {
-            $answer = trim($relevantSentences[0]) . '.';
+            // Get the first element (array_filter preserves keys, so use array_values or reset)
+            $answer = trim(array_values($relevantSentences)[0]) . '.';
         } else {
             // Fallback to first chunk
             $answer = substr($chunks->first()->text, 0, 200) . '...';

@@ -10,17 +10,21 @@ class QueryLog extends Model
 {
     use HasFactory;
 
-    public $timestamps = false;
     public $incrementing = false;
     protected $keyType = 'string';
 
     protected $fillable = [
-        'id', 'org_id', 'user_id', 'query_text', 'top_k', 'result_chunk_ids', 'model_used', 'cost_estimate', 'created_at'
+        'id',
+        'org_id',
+        'user_id',
+        'query_text',
+        'top_k',
+        'result_count',
+        'timestamp',
     ];
 
     protected $casts = [
-        'result_chunk_ids' => 'array',
-        'created_at' => 'datetime',
+        'timestamp' => 'datetime',
     ];
 
     protected static function booted(): void
@@ -29,11 +33,16 @@ class QueryLog extends Model
             if (!$model->id) {
                 $model->id = (string) Str::uuid();
             }
-            if (!$model->created_at) {
-                $model->created_at = now();
-            }
         });
     }
+
+    public function organization()
+    {
+        return $this->belongsTo(Organization::class, 'org_id');
+    }
+
+    public function user()
+    {
+        return $this->belongsTo(User::class);
+    }
 }
-
-
