@@ -16,10 +16,47 @@ class DocumentController extends Controller
     public function index(Request $request)
     {
         $orgId = $request->user()->org_id;
+        
         $docs = Document::where('org_id', $orgId)
+            ->with('connector')
+            ->withCount('chunks')
             ->orderByDesc('created_at')
-            ->paginate(20);
-        return response()->json($docs);
+            ->paginate(50);
+            
+        // Format response
+        $formatted = $docs->getCollection()->map(function($doc) {
+            $connector = $doc->connector;
+            $sourceType = 'Unknown';
+            if ($connector) {
+                $sourceType = match($connector->type) {
+                    'google_drive' => 'Google Drive',
+                    'slack' => 'Slack',
+                    'notion' => 'Notion',
+                    'dropbox' => 'Dropbox',
+                    default => ucfirst(str_replace('_', ' ', $connector->type))
+                };
+            }
+            
+            return [
+                'id' => $doc->id,
+                'title' => $doc->title,
+                'source' => $sourceType,
+                'source_url' => $doc->source_url,
+                'mime_type' => $doc->mime_type,
+                'size' => $doc->size,
+                'chunks_count' => $doc->chunks_count,
+                'created_at' => $doc->created_at,
+                'fetched_at' => $doc->fetched_at,
+            ];
+        });
+        
+        return response()->json([
+            'data' => $formatted,
+            'total' => $docs->total(),
+            'current_page' => $docs->currentPage(),
+            'per_page' => $docs->perPage(),
+            'last_page' => $docs->lastPage(),
+        ]);
     }
 
     public function show(Request $request, string $id)

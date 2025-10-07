@@ -34,6 +34,11 @@ class Document extends Model
     {
         return $this->hasMany(Chunk::class, 'document_id');
     }
+
+    public function connector()
+    {
+        return $this->belongsTo(Connector::class, 'connector_id');
+    }
 }
 
 
