@@ -41,7 +41,8 @@ class DocumentController extends Controller
                 'id' => $doc->id,
                 'title' => $doc->title,
                 'source' => $sourceType,
-                'source_url' => $doc->source_url,
+                'source_url' => $doc->source_url, // Use Cloudinary URL if available, fallback to source_url
+                // 'source_url' => $doc->s3_path ?: $doc->source_url, // Use Cloudinary URL if available, fallback to source_url
                 'mime_type' => $doc->mime_type,
                 'size' => $doc->size,
                 'chunks_count' => $doc->chunks_count,

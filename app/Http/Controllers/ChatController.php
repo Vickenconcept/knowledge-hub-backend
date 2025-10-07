@@ -75,7 +75,7 @@ class ChatController extends Controller
             // 3. Fetch chunk rows
             $chunks = Chunk::whereIn('id', $chunkIds)
                 ->with(['document' => function($q) {
-                    $q->select('id', 'title', 'source_url', 'org_id');
+                    $q->select('id', 'title', 'source_url', 's3_path', 'org_id');
                 }])
                 ->get()
                 ->keyBy('id');
@@ -129,7 +129,7 @@ class ChatController extends Controller
                     'chunk_id' => $snippet['chunk_id'],
                     'document_id' => $snippet['document_id'],
                     'title' => $chunk->document->title,
-                    'url' => $chunk->document->source_url,
+                    'url' => $chunk->document->s3_path ?: $chunk->document->source_url, // Use Cloudinary URL if available, fallback to source_url
                     'excerpt' => mb_substr($snippet['text'], 0, 300),
                     'char_start' => $snippet['char_start'],
                     'char_end' => $snippet['char_end'],
@@ -196,7 +196,7 @@ class ChatController extends Controller
             })
             ->where('text', 'like', '%' . $query . '%')
             ->with(['document' => function($q) {
-                $q->select('id', 'title', 'source_url', 'org_id');
+                $q->select('id', 'title', 'source_url', 's3_path', 'org_id');
             }])
             ->limit($topK)
             ->get();
@@ -206,7 +206,7 @@ class ChatController extends Controller
                 return [
                     'document_id' => $chunk->document->id,
                     'title' => $chunk->document->title,
-                    'url' => $chunk->document->source_url,
+                    'url' => $chunk->document->s3_path ?: $chunk->document->source_url, // Use Cloudinary URL if available
                     'excerpt' => $this->extractExcerpt($chunk->text, $query),
                     'char_start' => $chunk->char_start,
                     'char_end' => $chunk->char_end,
