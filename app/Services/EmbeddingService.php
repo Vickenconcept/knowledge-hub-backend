@@ -27,7 +27,11 @@ class EmbeddingService
             'input' => $text,
         ];
 
-        $resp = Http::withToken($this->apiKey)->post('https://api.openai.com/v1/embeddings', $payload);
+        $resp = Http::withToken($this->apiKey)
+            ->timeout(60) // 60 second timeout
+            ->retry(3, 1000) // Retry 3 times with 1 second delay
+            ->post('https://api.openai.com/v1/embeddings', $payload);
+            
         if (!$resp->successful()) {
             Log::error('EmbeddingService error', ['status' => $resp->status(), 'body' => $resp->body()]);
             throw new \RuntimeException('Failed to create embedding.');
@@ -48,7 +52,11 @@ class EmbeddingService
             'input' => array_values($texts),
         ];
 
-        $resp = Http::withToken($this->apiKey)->post('https://api.openai.com/v1/embeddings', $payload);
+        $resp = Http::withToken($this->apiKey)
+            ->timeout(60) // 60 second timeout
+            ->retry(3, 1000) // Retry 3 times with 1 second delay
+            ->post('https://api.openai.com/v1/embeddings', $payload);
+            
         if (!$resp->successful()) {
             Log::error('EmbeddingService batch error', ['status' => $resp->status(), 'body' => $resp->body()]);
             throw new \RuntimeException('Failed to create batch embeddings.');

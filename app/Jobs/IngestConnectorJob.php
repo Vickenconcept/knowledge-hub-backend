@@ -92,7 +92,7 @@ class IngestConnectorJob implements ShouldQueue
                 Log::warning('No encrypted tokens found for connector', ['connector_id' => $connector->id]);
             }
 
-                    if ($connector->type === 'google_drive') {
+        if ($connector->type === 'google_drive') {
                         Log::info('Starting Google Drive file processing...');
                         $largeFilesInfo = $this->processGoogleDriveFiles($connector, $tokens, $job, $docs, $chunks, $errors, $processedFiles, $skippedFiles);
                         Log::info('Google Drive file processing completed', [
@@ -368,16 +368,16 @@ class IngestConnectorJob implements ShouldQueue
                         // Create new document record
                         $document = \App\Models\Document::create([
                             'id' => (string) \Illuminate\Support\Str::uuid(),
-                            'org_id' => $this->orgId,
-                            'connector_id' => $connector->id,
+                    'org_id' => $this->orgId,
+                    'connector_id' => $connector->id,
                             'title' => $file->getName(),
                             'source_url' => $file->getWebViewLink(),
                             'mime_type' => $file->getMimeType(),
                             'sha256' => $contentHash,
                             'size' => strlen($content),
                             's3_path' => null, // We're not storing files in S3 for now
-                            'fetched_at' => now(),
-                        ]);
+                    'fetched_at' => now(),
+                ]);
                     }
 
                     Log::info("Creating chunks for document: " . $file->getName());
@@ -407,7 +407,7 @@ class IngestConnectorJob implements ShouldQueue
                         $this->generateAndUploadEmbeddings($createdChunks);
                     }
 
-                    $docs++;
+                $docs++;
                     $processedFiles++;
                     
                     Log::info("✅ Processed document: " . $file->getName(), [
@@ -444,7 +444,7 @@ class IngestConnectorJob implements ShouldQueue
             Log::error("Error listing Google Drive files: " . $e->getMessage());
             $errors++;
         }
-        
+
         // Return large files info for tracking
         return $largeFiles;
     }

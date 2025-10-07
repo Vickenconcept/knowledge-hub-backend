@@ -49,7 +49,11 @@ class VectorStoreService
             $payload['namespace'] = $namespace;
         }
 
-        $resp = Http::withHeaders(['Api-Key' => $this->apiKey, 'Content-Type' => 'application/json'])->post($url, $payload);
+        $resp = Http::withHeaders(['Api-Key' => $this->apiKey, 'Content-Type' => 'application/json'])
+            ->timeout(60) // 60 second timeout
+            ->retry(3, 1000) // Retry 3 times
+            ->post($url, $payload);
+            
         if (!$resp->successful()) {
             Log::error('VectorStore upsert failed', ['status' => $resp->status(), 'body' => $resp->body()]);
             // Graceful: don't throw; let ingestion continue
@@ -81,7 +85,11 @@ class VectorStoreService
         if (!empty($namespace)) {
             $payload['namespace'] = $namespace;
         }
-        $resp = Http::withHeaders(['Api-Key' => $this->apiKey, 'Content-Type' => 'application/json'])->post($url, $payload);
+        $resp = Http::withHeaders(['Api-Key' => $this->apiKey, 'Content-Type' => 'application/json'])
+            ->timeout(60) // 60 second timeout
+            ->retry(3, 1000) // Retry 3 times
+            ->post($url, $payload);
+            
         if (!$resp->successful()) {
             Log::error('VectorStore query failed', ['status' => $resp->status(), 'body' => $resp->body()]);
             throw new \RuntimeException('Vector query failed.');

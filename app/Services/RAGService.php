@@ -19,8 +19,32 @@ class RAGService
     public function assemblePrompt(string $query, array $snippets): string
     {
         $maxSnip = 6;
-        $buf = "You are an assistant that must answer using ONLY the provided context snippets. Prefer a direct, helpful answer when snippets contain relevant information. If the answer truly isn't present in the snippets, reply: \"I don't know — please check the source documents.\" Do not hallucinate.\n\n";
-        $buf .= "Context snippets (id, excerpt, char range):\n";
+        
+        // Check if this is a conversational greeting or casual question
+        $greetings = ['hello', 'hi', 'hey', 'good morning', 'good afternoon', 'good evening'];
+        $isGreeting = false;
+        foreach ($greetings as $greeting) {
+            if (stripos($query, $greeting) !== false && strlen($query) < 50) {
+                $isGreeting = true;
+                break;
+            }
+        }
+
+        if ($isGreeting || empty($snippets)) {
+            // For greetings or when no context is found, be conversational
+            $buf = "You are a friendly AI assistant for a team's knowledge hub. ";
+            $buf .= "The user just said: \"{$query}\"\n\n";
+            $buf .= "INSTRUCTIONS:\n";
+            $buf .= "- If it's a greeting (hello, hi, etc.), respond warmly and briefly explain what you can help with.\n";
+            $buf .= "- If it's a casual question not requiring document search, answer conversationally.\n";
+            $buf .= "- Keep it friendly and concise (2-3 sentences).\n";
+            $buf .= "- Return STRICT JSON with keys: answer (string), sources (array - can be empty for greetings).\n";
+            return $buf;
+        }
+
+        // For knowledge-based questions with context
+        $buf = "You are an intelligent AI assistant helping users find information from their team's knowledge base. Be conversational and helpful.\n\n";
+        $buf .= "Context snippets from relevant documents:\n";
         $count = 0;
         foreach ($snippets as $s) {
             if ($count >= $maxSnip) break;
@@ -31,10 +55,12 @@ class RAGService
         }
         $buf .= "User question: \"{$query}\"\n\n";
         $buf .= "INSTRUCTIONS:\n";
-        $buf .= "- Provide a concise answer (3-6 sentences) using the snippets.\n";
-        $buf .= "- If at least one snippet contains relevant information, do NOT answer \"I don't know\".\n";
+        $buf .= "- Provide a clear, conversational answer (3-6 sentences) using the context.\n";
+        $buf .= "- Be helpful and natural - don't sound robotic.\n";
+        $buf .= "- If the context contains relevant info, USE IT. Don't say you don't know.\n";
+        $buf .= "- If the answer truly isn't in the context, say so politely and suggest what they could search for.\n";
         $buf .= "- Return STRICT JSON with keys: answer (string), sources (array of {id:number, document_id:string, char_start:number, char_end:number}).\n";
-        $buf .= "- sources should list the snippet ids you used, each with its document_id and char range.\n";
+        $buf .= "- List the snippet IDs you actually used in your answer.\n";
         return $buf;
     }
 
@@ -55,7 +81,11 @@ class RAGService
             'response_format' => ['type' => 'json_object'],
         ];
 
-        $resp = Http::withToken($this->openAiKey)->post('https://api.openai.com/v1/chat/completions', $payload);
+        $resp = Http::withToken($this->openAiKey)
+            ->timeout(60) // 60 second timeout
+            ->retry(3, 1000) // Retry 3 times with 1 second delay
+            ->post('https://api.openai.com/v1/chat/completions', $payload);
+            
         if (!$resp->successful()) {
             Log::error('RAGService LLM call failed', ['status' => $resp->status(), 'body' => $resp->body()]);
             throw new \RuntimeException('LLM call failed.');

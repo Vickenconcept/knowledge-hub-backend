@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\Chunk;
+use App\Models\Connector;
 use App\Models\Document;
 use App\Models\Conversation;
 use App\Models\Message;
@@ -56,7 +57,7 @@ class ChatController extends Controller
             $embedding = $embeddingService->embed($queryText);
 
             // 2. Query vector store for nearest chunks
-            $matches = $vectorStore->query($embedding, $topK, $orgId);
+                $matches = $vectorStore->query($embedding, $topK, $orgId);
 
             // matches expected: array of ['id' => chunk_id, 'score' => float, 'metadata' => [...] ]
             $chunkIds = array_map(fn($m) => $m['id'], $matches);
@@ -104,12 +105,25 @@ class ChatController extends Controller
             $answerText = is_array($parsedAnswer) ? ($parsedAnswer['answer'] ?? $llmResponse['answer']) : $llmResponse['answer'];
             $llmSources = is_array($parsedAnswer) ? ($parsedAnswer['sources'] ?? []) : [];
 
-            // 5. Format sources with full details (title, URL, excerpt)
+            // 5. Format sources with full details (title, URL, excerpt, type)
             // Map the LLM's numbered sources back to actual chunks
             $formattedSources = [];
             foreach ($snippets as $idx => $snippet) {
                 $chunk = $chunks[$snippet['chunk_id']] ?? null;
                 if (!$chunk || !$chunk->document) continue;
+
+                // Get connector type to determine source type
+                $connector = Connector::find($chunk->document->connector_id);
+                $sourceType = 'Google Drive'; // Default
+                if ($connector) {
+                    $sourceType = match($connector->type) {
+                        'google_drive' => 'Google Drive',
+                        'slack' => 'Slack',
+                        'notion' => 'Notion',
+                        'dropbox' => 'Dropbox',
+                        default => ucfirst(str_replace('_', ' ', $connector->type))
+                    };
+                }
 
                 $formattedSources[] = [
                     'chunk_id' => $snippet['chunk_id'],
@@ -119,17 +133,18 @@ class ChatController extends Controller
                     'excerpt' => mb_substr($snippet['text'], 0, 300),
                     'char_start' => $snippet['char_start'],
                     'char_end' => $snippet['char_end'],
-                    'score' => $snippet['score'] ?? null
+                    'score' => $snippet['score'] ?? null,
+                    'type' => $sourceType
                 ];
             }
 
             // Log the query for analytics
             \App\Models\QueryLog::create([
                 'id' => (string) \Illuminate\Support\Str::uuid(),
-                'org_id' => $orgId,
+                    'org_id' => $orgId,
                 'user_id' => $user->id,
-                'query_text' => $queryText,
-                'top_k' => $topK,
+                    'query_text' => $queryText,
+                    'top_k' => $topK,
                 'result_count' => count($formattedSources),
                 'timestamp' => now(),
             ]);
