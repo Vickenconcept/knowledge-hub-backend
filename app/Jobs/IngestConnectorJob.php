@@ -5,6 +5,7 @@ namespace App\Jobs;
 use App\Models\Connector;
 use App\Models\IngestJob;
 use App\Services\GoogleDriveService;
+use App\Services\DropboxService;
 use App\Services\FileUploadService;
 use App\Services\DocumentExtractionService;
 use App\Models\Document;
@@ -22,13 +23,11 @@ class IngestConnectorJob implements ShouldQueue
 
     // Increase timeout to 30 minutes for large files
     public $timeout = 1800;
-    
+
     // Allow 3 attempts before failing
     public $tries = 3;
 
-    public function __construct(public string $connectorId, public string $orgId)
-    {
-    }
+    public function __construct(public string $connectorId, public string $orgId) {}
 
     public function handle(): void
     {
@@ -56,8 +55,8 @@ class IngestConnectorJob implements ShouldQueue
             'connector_id' => $connector->id,
             'status' => 'running',
             'stats' => [
-                'docs' => 0, 
-                'chunks' => 0, 
+                'docs' => 0,
+                'chunks' => 0,
                 'errors' => 0,
                 'total_files' => 0,
                 'processed_files' => 0,
@@ -68,42 +67,53 @@ class IngestConnectorJob implements ShouldQueue
 
         Log::info('IngestJob status set to running', ['job_id' => $job->id]);
 
-        $docs = 0; 
-        $chunks = 0; 
+        $docs = 0;
+        $chunks = 0;
         $errors = 0;
         $processedFiles = 0;
         $skippedFiles = 0;
 
         try {
             // Get tokens
-        $tokens = [];
-        if (!empty($connector->encrypted_tokens)) {
-                try { 
-                    $tokens = json_decode(decrypt($connector->encrypted_tokens), true) ?: []; 
+            $tokens = [];
+            if (!empty($connector->encrypted_tokens)) {
+                try {
+                    $tokens = json_decode(decrypt($connector->encrypted_tokens), true) ?: [];
                     Log::info('Tokens decrypted successfully', [
                         'has_access_token' => isset($tokens['access_token']),
                         'has_refresh_token' => isset($tokens['refresh_token'])
                     ]);
-                } catch (\Throwable $e) { 
+                } catch (\Throwable $e) {
                     Log::error("Error decrypting tokens: " . $e->getMessage());
-                    $tokens = []; 
+                    $tokens = [];
                 }
             } else {
                 Log::warning('No encrypted tokens found for connector', ['connector_id' => $connector->id]);
             }
 
-        if ($connector->type === 'google_drive') {
-                        Log::info('Starting Google Drive file processing...');
-                        $largeFilesInfo = $this->processGoogleDriveFiles($connector, $tokens, $job, $docs, $chunks, $errors, $processedFiles, $skippedFiles);
-                        Log::info('Google Drive file processing completed', [
-                            'docs' => $docs,
-                            'chunks' => $chunks,
-                            'errors' => $errors,
-                            'processed' => $processedFiles,
-                            'skipped' => $skippedFiles,
-                            'large_files_pending' => count($largeFilesInfo)
-                        ]);
-                    }
+            if ($connector->type === 'google_drive') {
+                Log::info('Starting Google Drive file processing...');
+                $largeFilesInfo = $this->processGoogleDriveFiles($connector, $tokens, $job, $docs, $chunks, $errors, $processedFiles, $skippedFiles);
+                Log::info('Google Drive file processing completed', [
+                    'docs' => $docs,
+                    'chunks' => $chunks,
+                    'errors' => $errors,
+                    'processed' => $processedFiles,
+                    'skipped' => $skippedFiles,
+                    'large_files_pending' => count($largeFilesInfo)
+                ]);
+            } elseif ($connector->type === 'dropbox') {
+                Log::info('Starting Dropbox file processing...');
+                $largeFilesInfo = $this->processDropboxFiles($connector, $tokens, $job, $docs, $chunks, $errors, $processedFiles, $skippedFiles);
+                Log::info('Dropbox file processing completed', [
+                    'docs' => $docs,
+                    'chunks' => $chunks,
+                    'errors' => $errors,
+                    'processed' => $processedFiles,
+                    'skipped' => $skippedFiles,
+                    'large_files_pending' => count($largeFilesInfo)
+                ]);
+            }
             // TODO: Add other connector types here (e.g., Slack, Notion)
 
         } catch (\Throwable $e) {
@@ -116,13 +126,13 @@ class IngestConnectorJob implements ShouldQueue
 
         // Update job status
         $pendingLargeFiles = count($largeFilesInfo ?? []);
-        
+
         if ($pendingLargeFiles > 0) {
             // If there are large files still processing, mark as 'processing_large_files'
             $job->status = 'processing_large_files';
             $job->stats = [
-                'docs' => $docs, 
-                'chunks' => $chunks, 
+                'docs' => $docs,
+                'chunks' => $chunks,
                 'errors' => $errors,
                 'total_files' => $job->stats['total_files'] ?? 0,
                 'processed_files' => $processedFiles,
@@ -136,8 +146,8 @@ class IngestConnectorJob implements ShouldQueue
             $job->status = 'completed';
             $job->finished_at = now();
             $job->stats = [
-                'docs' => $docs, 
-                'chunks' => $chunks, 
+                'docs' => $docs,
+                'chunks' => $chunks,
                 'errors' => $errors,
                 'total_files' => $job->stats['total_files'] ?? 0,
                 'processed_files' => $processedFiles,
@@ -153,8 +163,9 @@ class IngestConnectorJob implements ShouldQueue
             'stats' => $job->stats
         ]);
 
-        // Update connector last sync time
+        // Update connector last sync time and status
         $connector->last_synced_at = now();
+        $connector->status = 'connected'; // Reset status back to connected
         $connector->save();
 
         Log::info('=== IngestConnectorJob FINISHED ===', [
@@ -184,17 +195,17 @@ class IngestConnectorJob implements ShouldQueue
         }
 
         Log::info('Checking and refreshing token if needed');
-        
+
         // Check if token needs refresh and refresh if expired
         try {
             $newToken = $driveService->refreshTokenIfNeeded($tokens);
-            
+
             if ($newToken) {
                 // Token was refreshed, save the new token
                 Log::info('Saving refreshed token to database');
                 $connector->encrypted_tokens = encrypt(json_encode($newToken));
                 $connector->save();
-                
+
                 // Use the new token
                 $tokens = $newToken;
             }
@@ -250,10 +261,10 @@ class IngestConnectorJob implements ShouldQueue
                             'size' => $fileSize,
                             'size_mb' => round($fileSize / (1024 * 1024), 2) . ' MB'
                         ]);
-                        
+
                         // Track large file as pending
                         $largeFiles[] = $file->getName();
-                        
+
                         // Dispatch to dedicated large file processing job
                         ProcessLargeFileJob::dispatch(
                             $connector->id,
@@ -268,7 +279,7 @@ class IngestConnectorJob implements ShouldQueue
                             ],
                             $tokens
                         )->onQueue('large-files');
-                        
+
                         $processedFiles++;
                         continue;
                     } elseif ($fileSize > 100 * 1024 * 1024) { // > 100MB - Skip entirely
@@ -291,16 +302,18 @@ class IngestConnectorJob implements ShouldQueue
 
                     // Google Drive provides MD5 hash in metadata (if available)
                     $googleMd5 = $file->getMd5Checksum(); // May be null for some file types
-                    
+
                     if ($existingDocument && $googleMd5) {
                         // If we have an MD5 from Google Drive, use it for quick comparison
                         // Convert our SHA256 to MD5 for comparison (or store MD5 in DB)
                         // For now, we'll use a simpler approach: check modified time
                         $googleModifiedTime = $file->getModifiedTime();
                         $lastFetchedTime = $existingDocument->fetched_at;
-                        
-                        if ($googleModifiedTime && $lastFetchedTime && 
-                            strtotime($googleModifiedTime) <= strtotime($lastFetchedTime)) {
+
+                        if (
+                            $googleModifiedTime && $lastFetchedTime &&
+                            strtotime($googleModifiedTime) <= strtotime($lastFetchedTime)
+                        ) {
                             Log::info("⏭️ Document unchanged (by modified time), skipping: " . $file->getName(), [
                                 'document_id' => $existingDocument->id,
                                 'google_modified' => $googleModifiedTime,
@@ -317,12 +330,12 @@ class IngestConnectorJob implements ShouldQueue
                     // Get file content
                     $content = $driveService->getFileContent($file->getId(), $file->getMimeType());
                     Log::info("File content fetched", ['content_size' => strlen($content)]);
-                    
+
                     Log::info("Extracting text from: " . $file->getName());
                     // Extract text
                     $text = $extractor->extractText($content, $file->getMimeType(), $file->getName());
                     Log::info("Text extracted", ['text_length' => strlen($text)]);
-                    
+
                     if (empty(trim($text))) {
                         Log::info("⚠️ No text extracted from: " . $file->getName());
                         $skippedFiles++;
@@ -352,7 +365,7 @@ class IngestConnectorJob implements ShouldQueue
 
                         // Delete old chunks
                         \App\Models\Chunk::where('document_id', $existingDocument->id)->delete();
-                        
+
                         // Update document
                         $existingDocument->update([
                             'title' => $file->getName(),
@@ -368,23 +381,23 @@ class IngestConnectorJob implements ShouldQueue
                         // Create new document record
                         $document = \App\Models\Document::create([
                             'id' => (string) \Illuminate\Support\Str::uuid(),
-                    'org_id' => $this->orgId,
-                    'connector_id' => $connector->id,
+                            'org_id' => $this->orgId,
+                            'connector_id' => $connector->id,
                             'title' => $file->getName(),
                             'source_url' => $file->getWebViewLink(),
                             'mime_type' => $file->getMimeType(),
                             'sha256' => $contentHash,
                             'size' => strlen($content),
                             's3_path' => null, // We're not storing files in S3 for now
-                    'fetched_at' => now(),
-                ]);
+                            'fetched_at' => now(),
+                        ]);
                     }
 
                     Log::info("Creating chunks for document: " . $file->getName());
                     // Create chunks
                     $textChunks = $extractor->chunkText($text);
                     Log::info("Text chunked", ['chunk_count' => count($textChunks)]);
-                    
+
                     $createdChunks = [];
                     foreach ($textChunks as $index => $chunkText) {
                         $chunk = \App\Models\Chunk::create([
@@ -407,9 +420,9 @@ class IngestConnectorJob implements ShouldQueue
                         $this->generateAndUploadEmbeddings($createdChunks);
                     }
 
-                $docs++;
+                    $docs++;
                     $processedFiles++;
-                    
+
                     Log::info("✅ Processed document: " . $file->getName(), [
                         'chunks_created' => count($textChunks),
                         'total_docs' => $docs,
@@ -427,7 +440,6 @@ class IngestConnectorJob implements ShouldQueue
                         'current_file' => $file->getName(),
                     ]);
             $job->save();
-
                 } catch (\Exception $e) {
                     Log::error("❌ Error processing file: {$file->getName()}", [
                         'error' => $e->getMessage(),
@@ -439,7 +451,6 @@ class IngestConnectorJob implements ShouldQueue
                     $skippedFiles++;
                 }
             }
-
         } catch (\Exception $e) {
             Log::error("Error listing Google Drive files: " . $e->getMessage());
             $errors++;
@@ -471,7 +482,7 @@ class IngestConnectorJob implements ShouldQueue
 
                 // Extract texts for batch embedding
                 $texts = array_map(fn($chunk) => $chunk->text, $batch);
-                
+
                 // Generate embeddings in batch
                 $embeddings = $embeddingService->embedBatch($texts);
 
@@ -502,7 +513,6 @@ class IngestConnectorJob implements ShouldQueue
                 'total_chunks' => count($chunks),
                 'total_batches' => count($batches)
             ]);
-
         } catch (\Exception $e) {
             Log::error("❌ Error generating embeddings: " . $e->getMessage(), [
                 'trace' => $e->getTraceAsString()
@@ -510,6 +520,228 @@ class IngestConnectorJob implements ShouldQueue
             // Don't throw - allow ingestion to continue even if embeddings fail
         }
     }
+
+    /**
+     * Process Dropbox files
+     */
+    private function processDropboxFiles($connector, $tokens, $job, &$docs, &$chunks, &$errors, &$processedFiles, &$skippedFiles): array
+    {
+        $largeFilesInfo = [];
+
+        try {
+            $dropbox = new DropboxService($tokens['access_token'], $tokens['refresh_token'] ?? null);
+            $files = $dropbox->listFiles('', true); // List all files recursively
+
+            Log::info("📁 Found " . count($files) . " files in Dropbox");
+
+            $job->stats = ['files' => count($files), 'docs' => 0, 'chunks' => 0];
+            $job->save();
+
+            foreach ($files as $file) {
+                try {
+                    $processedFiles++;
+
+                    Log::info("Processing Dropbox file: {$file['name']}", [
+                        'path' => $file['path'],
+                        'size' => $file['size'],
+                        'mime' => $file['mime_type']
+                    ]);
+
+                    // Check if file type is supported
+                    if (!$dropbox->isSupportedFileType($file['mime_type'])) {
+                        Log::info("⏭️ Skipping unsupported file type", [
+                            'file' => $file['name'],
+                            'mime_type' => $file['mime_type']
+                        ]);
+                        $skippedFiles++;
+                        continue;
+                    }
+
+                    // OPTIMIZATION: Check if document exists BEFORE downloading
+                    // This saves bandwidth and processing time for unchanged files
+                    $dropboxPath = 'https://www.dropbox.com/home' . $file['path'];
+                    $existingDocument = \App\Models\Document::where('org_id', $this->orgId)
+                        ->where('connector_id', $connector->id)
+                        ->where('source_url', $dropboxPath)
+                        ->first();
+
+                    // Dropbox provides modified_time in metadata
+                    $dropboxModifiedTime = $file['modified_time'];
+
+                    if ($existingDocument && $dropboxModifiedTime) {
+                        // Check if file was modified after we last fetched it
+                        $lastFetchedTime = $existingDocument->fetched_at;
+
+                        if (
+                            $lastFetchedTime &&
+                            strtotime($dropboxModifiedTime) <= strtotime($lastFetchedTime)
+                        ) {
+                            Log::info("⏭️ Document unchanged (by modified time), skipping: " . $file['name'], [
+                                'document_id' => $existingDocument->id,
+                                'dropbox_modified' => $dropboxModifiedTime,
+                                'last_fetched' => $lastFetchedTime,
+                                'saved_bandwidth' => round($file['size'] / 1024, 2) . ' KB'
+                            ]);
+                            $skippedFiles++;
+                            $processedFiles++;
+                            continue; // Skip download and processing entirely!
+                        }
+                    }
+
+                    // Large file handling (> 2MB)
+                    if ($file['size'] > 2 * 1024 * 1024) {
+                        Log::info("📦 Large file detected - will process in background", [
+                            'file' => $file['name'],
+                            'size' => $file['size']
+                        ]);
+
+                        $largeFilesInfo[] = [
+                            'connector_id' => $connector->id,
+                            'file_data' => $file,
+                            'file_data' => array_merge($file, ['connector_type' => 'dropbox']),
+                            'org_id' => $this->orgId,
+                        ];
+
+                        continue;
+                    }
+
+                    // Download file content (only if we reach here - file is new or changed)
+                    $fileContent = $dropbox->downloadFile($file['path']);
+
+                    // Extract text
+                    $extractor = new DocumentExtractionService();
+                    $extractedText = $extractor->extractText($file['mime_type'], $fileContent);
+
+                    if (empty($extractedText)) {
+                        Log::warning("No text extracted from file", ['file' => $file['name']]);
+                        $errors++;
+                        $processedFiles++;
+                        continue;
+                    }
+
+                    // Generate content hash for verification
+                    $contentHash = hash('sha256', $fileContent);
+
+                    // Create or update document
+                    if ($existingDocument) {
+                        // Double-check with SHA256 hash after download
+                        if ($existingDocument->sha256 === $contentHash) {
+                            Log::info("⏭️ Document unchanged (by hash), skipping: " . $file['name'], [
+                                'document_id' => $existingDocument->id,
+                                'last_fetched' => $existingDocument->fetched_at
+                            ]);
+                            $skippedFiles++;
+                            $processedFiles++;
+                            continue; // Skip chunk creation if content hasn't changed
+                        }
+
+                        Log::info("🔄 Document changed, updating: " . $file['name'], [
+                            'document_id' => $existingDocument->id,
+                            'old_hash' => substr($existingDocument->sha256, 0, 8),
+                            'new_hash' => substr($contentHash, 0, 8)
+                        ]);
+
+                        // Delete old chunks
+                        \App\Models\Chunk::where('document_id', $existingDocument->id)->delete();
+
+                        // Update document
+                        $existingDocument->update([
+                            'title' => $file['name'],
+                            'mime_type' => $file['mime_type'],
+                            'sha256' => $contentHash,
+                            'size' => strlen($fileContent),
+                            'fetched_at' => now(),
+                        ]);
+
+                        $document = $existingDocument;
+                    } else {
+                        Log::info("➕ Creating new document record for: " . $file['name']);
+                        // Create new document record
+                        $document = \App\Models\Document::create([
+                            'id' => (string) \Illuminate\Support\Str::uuid(),
+                            'org_id' => $this->orgId,
+                            'connector_id' => $connector->id,
+                            'title' => $file['name'],
+                            'source_url' => $dropboxPath,
+                            'mime_type' => $file['mime_type'],
+                            'sha256' => $contentHash,
+                            'size' => strlen($fileContent),
+                            's3_path' => null, // We're not storing files in S3 for now
+                            'fetched_at' => now(),
+                        ]);
+                    }
+
+                $docs++;
+                    Log::info("✅ Document created", ['doc_id' => $document->id, 'title' => $file['name']]);
+
+                    // Chunk the text
+                    Log::info("Creating chunks for document", ['file' => $file['name']]);
+                    $textChunks = $extractor->chunkText($extractedText);
+                    Log::info("Text chunked", ['chunk_count' => count($textChunks)]);
+
+                    $createdChunks = [];
+                    foreach ($textChunks as $index => $chunkText) {
+                        $chunk = \App\Models\Chunk::create([
+                            'id' => (string) \Illuminate\Support\Str::uuid(),
+                            'org_id' => $this->orgId,
+                            'document_id' => $document->id,
+                            'chunk_index' => $index,
+                            'text' => $chunkText,
+                            'char_start' => $index * 2000,
+                            'char_end' => ($index + 1) * 2000,
+                            'token_count' => str_word_count($chunkText),
+                        ]);
+                        $createdChunks[] = $chunk;
+                        $chunks++;
+                    }
+
+                    // Generate embeddings and upload to Pinecone
+                    if (!empty($createdChunks)) {
+                        Log::info("Generating embeddings for chunks", ['chunk_count' => count($createdChunks)]);
+                        $this->generateAndUploadEmbeddings($createdChunks);
+                    }
+
+                    $processedFiles++;
+
+                    Log::info("✅ File processed successfully", [
+                        'file' => $file['name'],
+                        'chunks' => count($createdChunks)
+                    ]);
+                } catch (\Exception $e) {
+                    Log::error("Error processing Dropbox file: {$file['name']}", [
+                        'error' => $e->getMessage(),
+                        'trace' => $e->getTraceAsString()
+                    ]);
+            $errors++;
+        }
+
+                // Update job stats periodically
+                $job->stats = ['files' => count($files), 'docs' => $docs, 'chunks' => $chunks];
+            $job->save();
+        }
+
+            // Dispatch large file jobs
+            if (!empty($largeFilesInfo)) {
+                $job->pending_large_files = count($largeFilesInfo);
+                $job->save();
+
+                foreach ($largeFilesInfo as $fileInfo) {
+                    ProcessLargeFileJob::dispatch(
+                        $fileInfo['connector_id'],
+                        $fileInfo['file_data'],
+                        $fileInfo['org_id'],
+                        $job->id
+                    );
+                }
+            }
+        } catch (\Exception $e) {
+            Log::error("Dropbox processing error", [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+            $errors++;
+        }
+
+        return $largeFilesInfo;
+    }
 }
-
-

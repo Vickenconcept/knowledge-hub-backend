@@ -131,19 +131,7 @@ class ConnectorController extends Controller
             'has_tokens' => !empty($connector->encrypted_tokens)
         ]);
 
-        $job = IngestJob::create([
-            'org_id' => $connector->org_id,
-            'connector_id' => $connector->id,
-            'status' => 'queued',
-            'stats' => ['docs' => 0, 'chunks' => 0, 'errors' => 0],
-        ]);
-
-        \Log::info('IngestJob created', [
-            'job_id' => $job->id,
-            'connector_id' => $connector->id,
-            'status' => 'queued'
-        ]);
-
+        // Dispatch job - the job itself will create the IngestJob record
         IngestConnectorJob::dispatch($connector->id, $request->user()->org_id)->onQueue('default');
 
         \Log::info('IngestConnectorJob dispatched to queue', [
@@ -154,7 +142,7 @@ class ConnectorController extends Controller
 
         return response()->json([
             'message' => 'Ingestion started',
-            'job_id' => $job->id,
+            'job_id' => null, // Job will be created by the job itself
         ]);
     }
 

@@ -8,9 +8,12 @@ use App\Http\Controllers\ConnectorController;
 use App\Http\Controllers\DocumentController;
 use App\Http\Controllers\AdminController;
 use App\Http\Controllers\IngestJobController;
+use App\Http\Controllers\DropboxController;
 
 Route::post('auth/register', [AuthController::class, 'register']);
 Route::post('auth/login', [AuthController::class, 'login']);
+
+
 
 Route::get('health', function () {
     return response()->json([
@@ -82,6 +85,9 @@ Route::middleware('auth:sanctum')->group(function () {
     // Google Drive OAuth
     Route::get('connectors/google-drive/auth-url', [ConnectorController::class, 'getGoogleDriveAuthUrl']);
     
+    // Dropbox Integration
+    Route::get('connectors/dropbox/auth-url', [DropboxController::class, 'authUrl']);
+    Route::post('connectors/dropbox/{id}/disconnect', [DropboxController::class, 'disconnect']);
 
     // Documents
     Route::get('documents', [DocumentController::class, 'index']);

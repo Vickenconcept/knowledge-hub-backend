@@ -5,6 +5,7 @@ namespace App\Jobs;
 use App\Models\Document;
 use App\Models\Chunk;
 use App\Services\GoogleDriveService;
+use App\Services\DropboxService;
 use App\Services\DocumentExtractionService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -38,34 +39,21 @@ class ProcessLargeFileJob implements ShouldQueue
         Log::info('=== ProcessLargeFileJob STARTED ===', [
             'file_name' => $this->fileData['name'],
             'file_size' => $this->fileData['size'],
-            'file_id' => $this->fileData['id']
+            'file_id' => $this->fileData['id'],
+            'connector_type' => $this->fileData['connector_type'] ?? 'google_drive'
         ]);
 
-        $driveService = new GoogleDriveService();
         $extractor = new DocumentExtractionService();
+        $connectorType = $this->fileData['connector_type'] ?? 'google_drive';
 
         try {
-            // Refresh token if needed
-            $newToken = $driveService->refreshTokenIfNeeded($this->tokens);
-            if ($newToken) {
-                $this->tokens = $newToken;
-                // Update connector with new token
-                $connector = \App\Models\Connector::find($this->connectorId);
-                if ($connector) {
-                    $connector->encrypted_tokens = encrypt(json_encode($newToken));
-                    $connector->save();
-                }
+            // Handle different connector types
+            if ($connectorType === 'dropbox') {
+                $content = $this->fetchDropboxFile();
+            } else {
+                // Default: Google Drive
+                $content = $this->fetchGoogleDriveFile();
             }
-
-            $driveService->setAccessToken($this->tokens);
-
-            Log::info('Fetching large file content', ['name' => $this->fileData['name']]);
-            
-            // Get file content
-            $content = $driveService->getFileContent(
-                $this->fileData['id'],
-                $this->fileData['mime_type']
-            );
             
             Log::info('Large file content fetched', [
                 'size' => strlen($content),
@@ -296,6 +284,53 @@ class ProcessLargeFileJob implements ShouldQueue
             ]);
             // Don't throw - allow processing to complete even if embeddings fail
         }
+    }
+
+    /**
+     * Fetch file from Google Drive
+     */
+    private function fetchGoogleDriveFile(): string
+    {
+        $driveService = new GoogleDriveService();
+        
+        // Refresh token if needed
+        $newToken = $driveService->refreshTokenIfNeeded($this->tokens);
+        if ($newToken) {
+            $this->tokens = $newToken;
+            // Update connector with new token
+            $connector = \App\Models\Connector::find($this->connectorId);
+            if ($connector) {
+                $connector->encrypted_tokens = encrypt(json_encode($newToken));
+                $connector->save();
+            }
+        }
+
+        $driveService->setAccessToken($this->tokens);
+
+        Log::info('Fetching large file from Google Drive', ['name' => $this->fileData['name']]);
+        
+        return $driveService->getFileContent(
+            $this->fileData['id'],
+            $this->fileData['mime_type']
+        );
+    }
+
+    /**
+     * Fetch file from Dropbox
+     */
+    private function fetchDropboxFile(): string
+    {
+        $dropboxService = new DropboxService(
+            $this->tokens['access_token'],
+            $this->tokens['refresh_token'] ?? null
+        );
+
+        Log::info('Fetching large file from Dropbox', [
+            'name' => $this->fileData['name'],
+            'path' => $this->fileData['path']
+        ]);
+        
+        return $dropboxService->downloadFile($this->fileData['path']);
     }
 }
 
