@@ -39,6 +39,11 @@ class Connector extends Model
     {
         return $this->hasMany(Document::class, 'connector_id');
     }
+
+    public function chunks()
+    {
+        return $this->hasManyThrough(Chunk::class, Document::class, 'connector_id', 'document_id');
+    }
 }
 
 

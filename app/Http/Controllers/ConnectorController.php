@@ -21,10 +21,16 @@ class ConnectorController extends Controller
             ->where('created_at', '<', now()->subHour())
             ->update(['status' => 'failed']);
         
-        $connectors = Connector::where('org_id', $orgId)->get();
+        $connectors = Connector::where('org_id', $orgId)
+            ->withCount(['documents', 'chunks'])
+            ->get();
         
-        // Check for running ingest jobs and update connector status
+        // Rename count fields to match frontend expectations and check for running jobs
         foreach ($connectors as $connector) {
+            $connector->documents_count = $connector->documents_count ?? 0;
+            $connector->chunks_count = $connector->chunks_count ?? 0;
+            
+            // Check for running ingest jobs and update connector status
             $runningJob = IngestJob::where('connector_id', $connector->id)
                 ->whereIn('status', ['running', 'queued', 'processing_large_files'])
                 ->first();
