@@ -35,20 +35,7 @@ class ConnectorController extends Controller
                 ->whereIn('status', ['running', 'queued', 'processing_large_files'])
                 ->first();
             
-            \Log::info('Checking running job for connector', [
-                'connector_id' => $connector->id,
-                'type' => $connector->type,
-                'current_status' => $connector->status,
-                'has_running_job' => !is_null($runningJob),
-                'job_status' => $runningJob?->status ?? 'no job'
-            ]);
-            
             if ($runningJob) {
-                \Log::info('Setting connector status to syncing', [
-                    'connector_id' => $connector->id,
-                    'job_id' => $runningJob->id,
-                    'job_status' => $runningJob->status
-                ]);
                 $connector->status = 'syncing';
             }
         }
@@ -284,8 +271,8 @@ class ConnectorController extends Controller
             'has_tokens' => !empty($connector->encrypted_tokens)
         ]);
 
-        // Optionally kick off ingestion immediately
-        IngestConnectorJob::dispatch($connector->id, $connector->org_id)->onQueue('default');
+        // ❌ REMOVED AUTO-TRIGGER: User must manually click "Sync" button
+        // IngestConnectorJob::dispatch($connector->id, $connector->org_id)->onQueue('default');
 
         if ($request->isJson()) {
             return response()->json([

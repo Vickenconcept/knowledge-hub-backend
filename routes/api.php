@@ -102,4 +102,11 @@ Route::middleware('auth:sanctum')->group(function () {
 
     // Ingest jobs
     Route::get('ingest-jobs/{id}', [IngestJobController::class, 'show']);
+    
+    // DEBUG: Check running jobs
+    Route::get('debug/running-jobs', function() {
+        $jobs = \App\Models\IngestJob::whereIn('status', ['running', 'queued', 'processing_large_files'])
+            ->get(['id', 'connector_id', 'org_id', 'status', 'created_at']);
+        return response()->json(['jobs' => $jobs, 'count' => $jobs->count()]);
+    });
 });
