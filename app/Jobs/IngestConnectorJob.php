@@ -240,6 +240,17 @@ class IngestConnectorJob implements ShouldQueue
             $job->save();
 
             foreach ($files as $index => $file) {
+                // Check if job has been cancelled
+                $job->refresh();
+                if ($job->status === 'cancelled') {
+                    Log::info('🛑 Job cancelled by user, stopping processing', [
+                        'job_id' => $job->id,
+                        'processed_files' => $processedFiles,
+                        'total_files' => count($files)
+                    ]);
+                    return; // Exit gracefully (void return is fine here)
+                }
+
                 try {
                     Log::info("Processing file #{$index}", [
                         'name' => $file->getName(),
@@ -331,6 +342,13 @@ class IngestConnectorJob implements ShouldQueue
                     // Get file content
                     $content = $driveService->getFileContent($file->getId(), $file->getMimeType());
                     Log::info("File content fetched", ['content_size' => strlen($content)]);
+
+                    // Check if cancelled after download
+                    $job->refresh();
+                    if ($job->status === 'cancelled') {
+                        Log::info('🛑 Job cancelled after download, skipping processing', ['file' => $file->getName()]);
+                        return;
+                    }
 
                     // Upload file to Cloudinary
                     $cloudinaryUrl = null;
@@ -471,7 +489,7 @@ class IngestConnectorJob implements ShouldQueue
                     // Generate embeddings and upload to Pinecone
                     if (!empty($createdChunks)) {
                         Log::info("Generating embeddings for chunks", ['chunk_count' => count($createdChunks)]);
-                        $this->generateAndUploadEmbeddings($createdChunks);
+                        $this->generateAndUploadEmbeddings($createdChunks, $job);
                     }
 
                 $docs++;
@@ -517,7 +535,7 @@ class IngestConnectorJob implements ShouldQueue
     /**
      * Generate embeddings for chunks and upload to Pinecone
      */
-    private function generateAndUploadEmbeddings(array $chunks): void
+    private function generateAndUploadEmbeddings(array $chunks, $job): void
     {
         try {
             $embeddingService = app(\App\Services\EmbeddingService::class);
@@ -528,6 +546,17 @@ class IngestConnectorJob implements ShouldQueue
             $batches = array_chunk($chunks, $batchSize);
 
             foreach ($batches as $batchIndex => $batch) {
+                // Check if job has been cancelled before processing each batch
+                $job->refresh();
+                if ($job->status === 'cancelled') {
+                    Log::info('🛑 Job cancelled during embedding, stopping immediately', [
+                        'job_id' => $job->id,
+                        'batch_index' => $batchIndex + 1,
+                        'total_batches' => count($batches)
+                    ]);
+                    return; // Exit embedding process
+                }
+
                 Log::info("Processing embedding batch", [
                     'batch' => $batchIndex + 1,
                     'total_batches' => count($batches),
@@ -616,6 +645,17 @@ class IngestConnectorJob implements ShouldQueue
             $job->save();
 
             foreach ($files as $index => $file) {
+                // Check if job has been cancelled
+                $job->refresh();
+                if ($job->status === 'cancelled') {
+                    Log::info('🛑 Job cancelled by user, stopping processing', [
+                        'job_id' => $job->id,
+                        'processed_files' => $processedFiles,
+                        'total_files' => count($files)
+                    ]);
+                    return $largeFiles; // Exit gracefully, return large files array
+                }
+
                 try {
                     Log::info("Processing file #{$index}", [
                         'name' => $file['name'],
@@ -699,6 +739,13 @@ class IngestConnectorJob implements ShouldQueue
                     // Get file content
                     $content = $dropbox->downloadFile($file['path']);
                     Log::info("File content fetched", ['content_size' => strlen($content)]);
+
+                    // Check if cancelled after download
+                    $job->refresh();
+                    if ($job->status === 'cancelled') {
+                        Log::info('🛑 Job cancelled after download, skipping processing', ['file' => $file['name']]);
+                        return $largeFiles;
+                    }
 
                     // Upload file to Cloudinary
                     $cloudinaryUrl = null;
@@ -823,7 +870,7 @@ class IngestConnectorJob implements ShouldQueue
                     // Generate embeddings and upload to Pinecone
                     if (!empty($createdChunks)) {
                         Log::info("Generating embeddings for chunks", ['chunk_count' => count($createdChunks)]);
-                        $this->generateAndUploadEmbeddings($createdChunks);
+                        $this->generateAndUploadEmbeddings($createdChunks, $job);
                     }
 
                     $docs++;

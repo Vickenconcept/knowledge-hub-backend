@@ -43,6 +43,16 @@ class ProcessLargeFileJob implements ShouldQueue
             'connector_type' => $this->fileData['connector_type'] ?? 'google_drive'
         ]);
 
+        // Check if parent job has been cancelled
+        $ingestJob = \App\Models\IngestJob::find($this->ingestJobId);
+        if ($ingestJob && $ingestJob->status === 'cancelled') {
+            Log::info('🛑 Parent IngestJob cancelled, skipping large file processing', [
+                'job_id' => $this->ingestJobId,
+                'file' => $this->fileData['name']
+            ]);
+            return;
+        }
+
         $extractor = new DocumentExtractionService();
         $connectorType = $this->fileData['connector_type'] ?? 'google_drive';
 
@@ -147,7 +157,7 @@ class ProcessLargeFileJob implements ShouldQueue
                 Log::info('Generating embeddings for large file chunks', [
                     'chunk_count' => count($createdChunks)
                 ]);
-                $this->generateAndUploadEmbeddings($createdChunks);
+                $this->generateAndUploadEmbeddings($createdChunks, $ingestJob);
             }
 
             Log::info('✅ Large file processed successfully', [
@@ -225,7 +235,7 @@ class ProcessLargeFileJob implements ShouldQueue
     /**
      * Generate embeddings for chunks and upload to Pinecone
      */
-    private function generateAndUploadEmbeddings(array $chunks): void
+    private function generateAndUploadEmbeddings(array $chunks, $job): void
     {
         try {
             $embeddingService = app(\App\Services\EmbeddingService::class);
@@ -236,6 +246,19 @@ class ProcessLargeFileJob implements ShouldQueue
             $batches = array_chunk($chunks, $batchSize);
 
             foreach ($batches as $batchIndex => $batch) {
+                // Check if job has been cancelled before processing each batch
+                if ($job) {
+                    $job->refresh();
+                    if ($job->status === 'cancelled') {
+                        Log::info('🛑 Job cancelled during large file embedding, stopping immediately', [
+                            'job_id' => $job->id,
+                            'batch_index' => $batchIndex + 1,
+                            'total_batches' => count($batches)
+                        ]);
+                        return; // Exit embedding process
+                    }
+                }
+
                 Log::info("Processing embedding batch for large file", [
                     'batch' => $batchIndex + 1,
                     'total_batches' => count($batches),

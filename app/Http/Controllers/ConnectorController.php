@@ -146,6 +146,66 @@ class ConnectorController extends Controller
         ]);
     }
 
+    public function stopSync(Request $request, string $id)
+    {
+        $connector = Connector::where('id', $id)
+            ->where('org_id', $request->user()->org_id)
+            ->firstOrFail();
+
+        \Log::info('=== STOP SYNC REQUESTED ===', [
+            'connector_id' => $connector->id,
+            'user_id' => $request->user()->id,
+            'current_status' => $connector->status
+        ]);
+
+        // Find any running/queued jobs for this connector
+        $runningJobs = IngestJob::where('connector_id', $connector->id)
+            ->whereIn('status', ['running', 'queued', 'processing_large_files'])
+            ->get();
+
+        if ($runningJobs->isEmpty()) {
+            \Log::info('No running jobs found to stop', ['connector_id' => $connector->id]);
+            return response()->json(['message' => 'No sync in progress'], 400);
+        }
+
+        // Mark all running jobs as cancelled
+        foreach ($runningJobs as $job) {
+            $oldStatus = $job->status;
+            $job->status = 'cancelled';
+            $job->finished_at = now();
+            
+            // Update stats to indicate cancellation
+            $stats = $job->stats ?? [];
+            $stats['cancelled_at'] = now()->toISOString();
+            $stats['cancelled_by'] = $request->user()->id;
+            $stats['current_file'] = 'Cancelled by user';
+            $job->stats = $stats;
+            
+            $job->save();
+
+            \Log::info('IngestJob marked as cancelled', [
+                'job_id' => $job->id,
+                'old_status' => $oldStatus,
+                'new_status' => 'cancelled'
+            ]);
+        }
+
+        // Reset connector status
+        $connector->status = 'connected';
+        $connector->save();
+
+        \Log::info('Connector status reset after sync stop', [
+            'connector_id' => $connector->id,
+            'status' => 'connected'
+        ]);
+
+        return response()->json([
+            'message' => 'Sync stopped successfully',
+            'connector' => $connector,
+            'cancelled_jobs' => $runningJobs->count()
+        ]);
+    }
+
     public function getGoogleDriveAuthUrl(Request $request)
     {
         $client = new GoogleClient();
