@@ -16,7 +16,7 @@ class RAGService
         $this->chatModel = env('OPENAI_CHAT_MODEL', 'gpt-4o-mini');
     }
 
-    public function assemblePrompt(string $query, array $snippets, string $responseStyle = 'comprehensive'): string
+    public function assemblePrompt(string $query, array $snippets, string $responseStyle = 'comprehensive', array $conversationContext = []): string
     {
         $maxSnip = 15; // Increased from 6 to 15 for more comprehensive context
         
@@ -72,6 +72,11 @@ class RAGService
         $confidenceService = new \App\Services\ConfidenceScoreService();
         $confidenceAnalysis = $confidenceService->analyzeSnippets($snippets);
         $confidenceSummary = $confidenceService->getConfidenceSummary($confidenceAnalysis);
+        
+        // Add conversation context if available
+        if (!empty($conversationContext)) {
+            $buf .= \App\Services\ConversationMemoryService::formatConversationForPrompt($conversationContext, 5);
+        }
         
         $buf .= "═══════════════════════════════════════════\n";
         $buf .= "User Question: \"{$query}\"\n";

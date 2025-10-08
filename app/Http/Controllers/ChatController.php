@@ -65,10 +65,40 @@ class ChatController extends Controller
         ]);
 
         try {
-            // 1. Create embedding for query
+            // 1. Check if this is a meta-question about the conversation itself
+            $isMetaQuestion = \App\Services\ConversationMemoryService::isMetaQuestion($queryText);
+            
+            if ($isMetaQuestion) {
+                // Get conversation history
+                $conversationHistory = \App\Services\ConversationMemoryService::getConversationContext($conversation->id, 10);
+                
+                // Try to build a direct response for simple meta-questions
+                $metaResponse = \App\Services\ConversationMemoryService::buildMetaResponse($queryText, $conversationHistory);
+                
+                if ($metaResponse) {
+                    // Save assistant message
+                    Message::create([
+                        'conversation_id' => $conversation->id,
+                        'role' => 'assistant',
+                        'content' => $metaResponse,
+                        'sources' => [],
+                    ]);
+                    
+                    return response()->json([
+                        'answer' => $metaResponse,
+                        'sources' => [],
+                        'query' => $queryText,
+                        'result_count' => 0,
+                        'conversation_id' => $conversation->id,
+                        'is_meta_question' => true,
+                    ]);
+                }
+            }
+            
+            // 2. Create embedding for query
             $embedding = $embeddingService->embed($queryText);
 
-            // 2. Query vector store for nearest chunks
+            // 3. Query vector store for nearest chunks
                 $matches = $vectorStore->query($embedding, $topK, $orgId);
 
             // matches expected: array of ['id' => chunk_id, 'score' => float, 'metadata' => [...] ]
@@ -139,7 +169,10 @@ class ChatController extends Controller
                 'query' => $queryText
             ]);
             
-            $prompt = $rag->assemblePrompt($queryText, $snippets, $responseStyle);
+            // Get conversation context for better awareness
+            $conversationContext = \App\Services\ConversationMemoryService::getConversationContext($conversation->id, 5);
+            
+            $prompt = $rag->assemblePrompt($queryText, $snippets, $responseStyle, $conversationContext);
             
             // Get max_tokens from response style config
             $styleConfig = \App\Services\ResponseStyleService::getStyleInstructions($responseStyle);
