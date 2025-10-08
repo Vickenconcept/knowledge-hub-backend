@@ -27,7 +27,7 @@ class ChatController extends Controller
         ]);
 
         $queryText = $validated['query'];
-        $topK = $validated['top_k'] ?? 6;
+        $topK = $validated['top_k'] ?? 15; // Increased from 6 to 15 for more comprehensive results
         $conversationId = $validated['conversation_id'] ?? null;
 
         // Get or create conversation

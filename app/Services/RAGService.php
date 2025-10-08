@@ -18,7 +18,7 @@ class RAGService
 
     public function assemblePrompt(string $query, array $snippets): string
     {
-        $maxSnip = 6;
+        $maxSnip = 15; // Increased from 6 to 15 for more comprehensive context
         
         // Check if this is a conversational greeting or casual question
         $greetings = ['hello', 'hi', 'hey', 'good morning', 'good afternoon', 'good evening'];
@@ -43,24 +43,48 @@ class RAGService
         }
 
         // For knowledge-based questions with context
-        $buf = "You are an intelligent AI assistant helping users find information from their team's knowledge base. Be conversational and helpful.\n\n";
-        $buf .= "Context snippets from relevant documents:\n";
+        $buf = "You are an expert knowledge researcher and analyst. Your role is to deeply analyze all provided documents and synthesize comprehensive, exhaustive answers.\n\n";
+        $buf .= "AVAILABLE CONTEXT (Review ALL snippets before answering):\n\n";
         $count = 0;
         foreach ($snippets as $s) {
             if ($count >= $maxSnip) break;
             $count++;
             $title = $s['document_id'] ?? 'unknown_doc';
-            $excerpt = mb_substr($s['text'] ?? '', 0, 800);
-            $buf .= "[{$count}] Document: {$title} | excerpt: \"{$excerpt}\" | chars: " . ($s['char_start'] ?? 0) . "-" . ($s['char_end'] ?? 0) . "\n\n";
+            $excerpt = mb_substr($s['text'] ?? '', 0, 1200); // Increased from 800 to 1200 characters
+            $buf .= "[{$count}] Document: {$title}\n";
+            $buf .= "Content: \"{$excerpt}\"\n";
+            $buf .= "Location: chars " . ($s['char_start'] ?? 0) . "-" . ($s['char_end'] ?? 0) . "\n\n";
         }
-        $buf .= "User question: \"{$query}\"\n\n";
-        $buf .= "INSTRUCTIONS:\n";
-        $buf .= "- Provide a clear, conversational answer (3-6 sentences) using the context.\n";
-        $buf .= "- Be helpful and natural - don't sound robotic.\n";
-        $buf .= "- If the context contains relevant info, USE IT. Don't say you don't know.\n";
-        $buf .= "- If the answer truly isn't in the context, say so politely and suggest what they could search for.\n";
-        $buf .= "- Return STRICT JSON with keys: answer (string), sources (array of {id:number, document_id:string, char_start:number, char_end:number}).\n";
-        $buf .= "- List the snippet IDs you actually used in your answer.\n";
+        $buf .= "═══════════════════════════════════════════\n";
+        $buf .= "User Question: \"{$query}\"\n";
+        $buf .= "═══════════════════════════════════════════\n\n";
+        $buf .= "CRITICAL INSTRUCTIONS:\n\n";
+        $buf .= "1. COMPREHENSIVE COVERAGE:\n";
+        $buf .= "   - Read and analyze EVERY SINGLE snippet above (all {$count} documents)\n";
+        $buf .= "   - Don't stop at the first 2-3 snippets - scan all of them for relevant information\n";
+        $buf .= "   - If the question asks for 'all', 'list', 'what skills', etc., enumerate EVERYTHING found\n\n";
+        $buf .= "2. DEPTH & DETAIL:\n";
+        $buf .= "   - Provide 8-15 sentences for detailed questions (not 2-3)\n";
+        $buf .= "   - Include specific technologies, tools, numbers, dates, project names\n";
+        $buf .= "   - Mention accomplishments, certifications, and unique qualifications\n\n";
+        $buf .= "3. INTELLIGENT SYNTHESIS:\n";
+        $buf .= "   - Merge information from multiple documents (e.g., UI/UX resume + Developer resume)\n";
+        $buf .= "   - Group related items logically:\n";
+        $buf .= "     * For skills: Frontend, Backend, UI/UX, DevOps, Soft Skills\n";
+        $buf .= "     * For experience: Chronological order with details\n";
+        $buf .= "     * For projects: Key achievements and technologies used\n";
+        $buf .= "   - Eliminate redundancy but retain unique details from each source\n\n";
+        $buf .= "4. STRUCTURED OUTPUT:\n";
+        $buf .= "   - Use clear topic sentences and logical flow\n";
+        $buf .= "   - When listing items, use natural language (not bullet points in the answer text)\n";
+        $buf .= "   - Example: 'His technical skills include React.js, Vue.js, and Next.js for frontend development; Laravel, Django, and Node.js for backend; as well as UI/UX design expertise in Figma and user research.'\n\n";
+        $buf .= "5. COMPLETENESS CHECK:\n";
+        $buf .= "   - Before finalizing your answer, verify you've addressed the question using information from ALL relevant snippets\n";
+        $buf .= "   - If you only used 2-3 snippets but there are 10+, you're probably missing important information!\n\n";
+        $buf .= "6. OUTPUT FORMAT:\n";
+        $buf .= "   - Return STRICT JSON: {\"answer\": \"your detailed response here\", \"sources\": [{\"id\":1, \"document_id\":\"...\", \"char_start\":0, \"char_end\":100}, ...]}\n";
+        $buf .= "   - In the sources array, list ALL snippet IDs you actually referenced (not just the first one)\n\n";
+        $buf .= "Remember: This is a knowledge hub - users expect comprehensive, researched answers, not brief summaries. Dig deep!\n";
         return $buf;
     }
 
@@ -73,11 +97,11 @@ class RAGService
         $payload = [
             'model' => $this->chatModel,
             'messages' => [
-                ['role' => 'system', 'content' => 'You are a helpful assistant that must cite source excerpts provided.'],
+                ['role' => 'system', 'content' => 'You are a comprehensive knowledge assistant that provides detailed, thorough answers by synthesizing information from multiple sources.'],
                 ['role' => 'user', 'content' => $prompt],
             ],
-            'max_tokens' => 512,
-            'temperature' => 0.0,
+            'max_tokens' => 1500, // Increased from 512 to 1500 for more detailed responses
+            'temperature' => 0.1, // Slightly increased from 0.0 for more natural language
             'response_format' => ['type' => 'json_object'],
         ];
 
