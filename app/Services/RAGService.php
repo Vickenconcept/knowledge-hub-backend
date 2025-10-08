@@ -16,7 +16,14 @@ class RAGService
         $this->chatModel = env('OPENAI_CHAT_MODEL', 'gpt-4o-mini');
     }
 
-    public function assemblePrompt(string $query, array $snippets, string $responseStyle = 'comprehensive', array $conversationContext = []): string
+    public function assemblePrompt(
+        string $query, 
+        array $snippets, 
+        string $responseStyle = 'comprehensive', 
+        array $conversationContext = [],
+        array $routing = [],
+        ?array $lastAnswer = null
+    ): string
     {
         $maxSnip = 15; // Increased from 6 to 15 for more comprehensive context
         
@@ -78,8 +85,22 @@ class RAGService
             $buf .= \App\Services\ConversationMemoryService::formatConversationForPrompt($conversationContext, 5);
         }
         
+        // For refinement queries, highlight the previous answer
+        if (!empty($lastAnswer) && isset($routing['route_type']) && $routing['route_type'] === 'refinement') {
+            $buf .= "🔍 REFINEMENT CONTEXT (User is narrowing/filtering previous response):\n\n";
+            $buf .= "Previous Answer: \"" . mb_substr($lastAnswer['content'], 0, 500) . "...\"\n\n";
+            $buf .= "User is now asking for a REFINED/FILTERED version of this information.\n";
+            $buf .= "Pay special attention to narrowing keywords: 'only', 'just', 'specifically', 'excluding', etc.\n\n";
+            $buf .= "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n";
+        }
+        
         $buf .= "═══════════════════════════════════════════\n";
         $buf .= "User Question: \"{$query}\"\n";
+        
+        // Add routing context awareness
+        if (isset($routing['route_type'])) {
+            $buf .= "Query Type: {$routing['route_type']} (confidence: " . ($routing['confidence'] ?? 0) . ")\n";
+        }
         $buf .= "Query Intent: {$intent['primary_intent']} (All: " . implode(', ', $intent['all_intents']) . ")\n";
         $buf .= "Document Types in Context: " . implode(', ', $uniqueTypes) . "\n";
         $buf .= "═══════════════════════════════════════════\n\n";

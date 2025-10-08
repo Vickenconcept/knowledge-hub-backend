@@ -65,18 +65,60 @@ class ChatController extends Controller
         ]);
 
         try {
-            // 1. Check if this is a meta-question about the conversation itself
-            $isMetaQuestion = \App\Services\ConversationMemoryService::isMetaQuestion($queryText);
+            // 1. INTELLIGENT CONTEXT ROUTING
+            // Get conversation history for routing decision
+            $conversationHistory = \App\Services\ConversationMemoryService::getConversationContext($conversation->id, 10);
             
-            if ($isMetaQuestion) {
-                // Get conversation history
-                $conversationHistory = \App\Services\ConversationMemoryService::getConversationContext($conversation->id, 10);
+            // Route query to appropriate context sources
+            $routing = \App\Services\ContextRouter::routeQuery($queryText, $conversationHistory);
+            
+            Log::info('Context routing decision', [
+                'query' => $queryText,
+                'route_type' => $routing['route_type'],
+                'confidence' => $routing['confidence'],
+                'reasoning' => $routing['reasoning'],
+                'search_documents' => $routing['search_documents'],
+                'search_messages' => $routing['search_messages'],
+                'attach_last_answer' => $routing['attach_last_answer'],
+            ]);
+            
+            // Handle ENTITY QUERIES (who/which people/users)
+            $entityInfo = \App\Services\EntitySearchService::isEntityQuery($queryText);
+            
+            if ($entityInfo['is_entity_query']) {
+                Log::info('Entity query detected - searching across entities', [
+                    'entity_type' => $entityInfo['entity_type'],
+                    'intent' => $entityInfo['query_intent'],
+                    'skills' => $entityInfo['skill_keywords'],
+                ]);
                 
-                // Try to build a direct response for simple meta-questions
+                $entityResults = \App\Services\EntitySearchService::searchEntities($queryText, $entityInfo, $orgId);
+                $formattedResponse = \App\Services\EntitySearchService::formatEntityResults($entityResults, $queryText);
+                
+                // Save assistant message
+                Message::create([
+                    'conversation_id' => $conversation->id,
+                    'role' => 'assistant',
+                    'content' => $formattedResponse,
+                    'sources' => [],
+                ]);
+                
+                return response()->json([
+                    'answer' => $formattedResponse,
+                    'sources' => [],
+                    'query' => $queryText,
+                    'result_count' => $entityResults['total'],
+                    'conversation_id' => $conversation->id,
+                    'route_type' => 'entity_search',
+                    'entities' => $entityResults['entities'],
+                ]);
+            }
+            
+            // Handle pure meta-questions (conversation-only queries)
+            if ($routing['route_type'] === 'meta') {
                 $metaResponse = \App\Services\ConversationMemoryService::buildMetaResponse($queryText, $conversationHistory);
                 
                 if ($metaResponse) {
-                    // Save assistant message
                     Message::create([
                         'conversation_id' => $conversation->id,
                         'role' => 'assistant',
@@ -90,40 +132,37 @@ class ChatController extends Controller
                         'query' => $queryText,
                         'result_count' => 0,
                         'conversation_id' => $conversation->id,
-                        'is_meta_question' => true,
+                        'route_type' => 'meta',
                     ]);
                 }
             }
             
-            // 2. Create embedding for query
+            // 2. Search documents if routing says so
+            $snippets = [];
+            if ($routing['search_documents']) {
             $embedding = $embeddingService->embed($queryText);
-
-            // 3. Query vector store for nearest chunks
                 $matches = $vectorStore->query($embedding, $topK, $orgId);
-
-            // matches expected: array of ['id' => chunk_id, 'score' => float, 'metadata' => [...] ]
             $chunkIds = array_map(fn($m) => $m['id'], $matches);
 
             if (empty($chunkIds)) {
                 return response()->json([
                     'answer' => "I don't know — no relevant documents found.",
                     'sources' => [],
-                    'query' => $queryText,
-                    'result_count' => 0,
-                    'raw' => null
-                ]);
-            }
+                        'query' => $queryText,
+                        'result_count' => 0,
+                        'raw' => null
+                    ]);
+                }
 
-            // 3. Fetch chunk rows
-            $chunks = Chunk::whereIn('id', $chunkIds)
-                ->with(['document' => function($q) {
-                    $q->select('id', 'title', 'source_url', 's3_path', 'org_id', 'connector_id', 'doc_type', 'tags', 'metadata');
-                }, 'document.connector'])
-                ->get()
-                ->keyBy('id');
+                // 3. Fetch chunk rows
+                $chunks = Chunk::whereIn('id', $chunkIds)
+                    ->with(['document' => function($q) {
+                        $q->select('id', 'title', 'source_url', 's3_path', 'org_id', 'connector_id', 'doc_type', 'tags', 'metadata');
+                    }, 'document.connector'])
+                    ->get()
+                    ->keyBy('id');
 
-            // Build an ordered snippets array based on matches
-            $snippets = [];
+                // Build an ordered snippets array based on matches
             foreach ($matches as $m) {
                 $cid = $m['id'];
                 if (!isset($chunks[$cid])) continue;
@@ -134,10 +173,11 @@ class ChatController extends Controller
                     'text' => $c->text,
                     'char_start' => $c->char_start,
                     'char_end' => $c->char_end,
-                    'score' => $m['score'],
-                    'doc_type' => $c->document->doc_type ?? 'general',
-                    'tags' => $c->document->tags ?? [],
-                ];
+                        'score' => $m['score'],
+                        'doc_type' => $c->document->doc_type ?? 'general',
+                        'tags' => $c->document->tags ?? [],
+                    ];
+                }
             }
 
             // 4. Intelligent Style Selection
@@ -169,10 +209,18 @@ class ChatController extends Controller
                 'query' => $queryText
             ]);
             
-            // Get conversation context for better awareness
-            $conversationContext = \App\Services\ConversationMemoryService::getConversationContext($conversation->id, 5);
+            // Get enhanced context based on routing decision
+            $enhancedContext = \App\Services\ContextRouter::buildEnhancedContext($routing, $conversation->id, $conversationHistory);
             
-            $prompt = $rag->assemblePrompt($queryText, $snippets, $responseStyle, $conversationContext);
+            // Pass routing metadata to RAG for intelligent prompt building
+            $prompt = $rag->assemblePrompt(
+                $queryText, 
+                $snippets, 
+                $responseStyle, 
+                $enhancedContext['conversation_history'],
+                $routing,
+                $enhancedContext['last_answer']
+            );
             
             // Get max_tokens from response style config
             $styleConfig = \App\Services\ResponseStyleService::getStyleInstructions($responseStyle);

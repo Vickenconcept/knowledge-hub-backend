@@ -106,6 +106,7 @@ class DocumentClassificationService
     
     /**
      * Extract relevant tags from document
+     * Uses generic keyword extraction - works for any domain
      */
     private function extractTags(string $text, string $filename, string $docType): array
     {
@@ -114,40 +115,40 @@ class DocumentClassificationService
         // Add doc type as a tag
         $tags[] = $docType;
         
-        // Technology tags
-        $technologies = [
-            'react', 'vue', 'angular', 'next.js', 'laravel', 'django', 'node.js', 
-            'python', 'php', 'javascript', 'typescript', 'java', 'docker', 'kubernetes',
-            'aws', 'azure', 'gcp', 'mongodb', 'postgresql', 'mysql', 'redis',
-            'figma', 'sketch', 'adobe xd', 'photoshop', 'illustrator'
-        ];
+        // Generic keyword extraction using frequency analysis
+        // Extract important capitalized words and technical terms
+        $words = str_word_count($text, 1);
+        $wordFreq = array_count_values(array_map('strtolower', $words));
         
-        foreach ($technologies as $tech) {
-            if (str_contains($text, $tech)) {
-                $tags[] = $tech;
-            }
-        }
+        // Get common words (appeared 2+ times, length > 3)
+        $commonWords = array_filter($wordFreq, fn($count, $word) => 
+            $count >= 2 && 
+            strlen($word) > 3 && 
+            !in_array($word, ['this', 'that', 'with', 'from', 'have', 'been', 'were', 'will', 'your', 'their', 'there', 'where'])
+        , ARRAY_FILTER_USE_BOTH);
         
-        // Skill categories
-        if (str_contains($text, 'ui/ux') || str_contains($text, 'user experience') || 
-            str_contains($text, 'user interface')) {
-            $tags[] = 'ui_ux';
-        }
-        if (str_contains($text, 'frontend') || str_contains($text, 'front-end')) {
-            $tags[] = 'frontend';
-        }
-        if (str_contains($text, 'backend') || str_contains($text, 'back-end')) {
-            $tags[] = 'backend';
-        }
-        if (str_contains($text, 'devops') || str_contains($text, 'ci/cd')) {
-            $tags[] = 'devops';
-        }
-        if (str_contains($text, 'full stack') || str_contains($text, 'full-stack')) {
-            $tags[] = 'fullstack';
-        }
+        // Sort by frequency and take top keywords
+        arsort($commonWords);
+        $topKeywords = array_slice(array_keys($commonWords), 0, 15);
         
-        // Remove duplicates and limit to most relevant
-        return array_unique(array_slice($tags, 0, 10));
+        // Also extract any @ mentions, # tags, or ALL CAPS terms (likely important)
+        preg_match_all('/\b[A-Z]{2,}\b/', $text, $capsTerms);
+        preg_match_all('/#\w+/', $text, $hashtags);
+        
+        // Combine all tags
+        $tags = array_merge(
+            $tags,
+            $topKeywords,
+            array_slice(array_map('strtolower', $capsTerms[0] ?? []), 0, 5),
+            array_map(fn($tag) => ltrim($tag, '#'), $hashtags[0] ?? [])
+        );
+        
+        // Remove duplicates and common stopwords
+        $stopwords = ['document', 'file', 'page', 'content', 'text', 'info', 'information', 'data'];
+        $tags = array_filter($tags, fn($tag) => !in_array(strtolower($tag), $stopwords));
+        
+        // Limit to most relevant
+        return array_values(array_unique(array_slice($tags, 0, 20)));
     }
     
     /**
