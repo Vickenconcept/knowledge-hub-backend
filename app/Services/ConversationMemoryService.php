@@ -15,15 +15,20 @@ class ConversationMemoryService
         $query = strtolower(trim($query));
         
         $metaPatterns = [
-            '/\b(what did (i|we) (ask|say|discuss|talk about))\b/',
+            '/\b(what (did|was|were) (i|we|the last thing))\b.*\b(ask|say|discuss|talk)\b/',
             '/\b(you (said|mentioned|told|explained))\b/',
-            '/\b(earlier|before|previously|last time)\b/',
+            '/\b(last (thing|question|query|message))\b.*\b(asked?|said)\b/',
             '/\b(remind me|recall|remember)\b/',
             '/\b(our (conversation|discussion|chat))\b/',
-            '/\b(what was (my|the) (last|previous) (question|query))\b/',
+            '/\b(what was (my|the) (last|previous) (question|query|thing))\b/',
             '/\b(go back|look back)\b/',
             '/\b(you answered|your (answer|response))\b/',
         ];
+        
+        // Don't match if it's a cross-session query (those go to session memory)
+        if (self::isSessionMemoryQuery($query)) {
+            return false;
+        }
         
         foreach ($metaPatterns as $pattern) {
             if (preg_match($pattern, $query)) {
@@ -31,6 +36,30 @@ class ConversationMemoryService
                     'query' => $query,
                     'pattern' => $pattern
                 ]);
+                return true;
+            }
+        }
+        
+        return false;
+    }
+    
+    /**
+     * Detect if query is asking about past sessions/conversations
+     */
+    public static function isSessionMemoryQuery(string $query): bool
+    {
+        $query = strtolower(trim($query));
+        
+        $sessionPatterns = [
+            '/\b(last (week|month|time|session|chat))\b/',
+            '/\b(previous (conversation|chat|session))\b/',
+            '/\b((weeks?|months?|days?) ago)\b/',
+            '/\b(in our (past|previous|earlier) (conversations?|chats?))\b/',
+            '/\b(across (all|our) (conversations?|chats?))\b/',
+        ];
+        
+        foreach ($sessionPatterns as $pattern) {
+            if (preg_match($pattern, $query)) {
                 return true;
             }
         }

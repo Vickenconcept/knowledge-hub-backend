@@ -26,26 +26,46 @@ class EntitySearchService
             'query_intent' => null,
             'skill_keywords' => [],
             'confidence' => 0.0,
+            'is_count_query' => false, // Just want the count, not full details
         ];
         
-        // 1. WHO/WHICH patterns (asking about entities - people, companies, products, etc.)
+        // 1. WHO/WHICH patterns - MUST combine action + entity type
+        // This prevents false matches on generic "list" or "what" queries
         $whoPatterns = [
-            // Generic entity patterns
-            '/\b(who|which|what)\b/',
-            '/\b(list (all|the)?)\b/',
-            '/\b(find (all|the)?)\b/',
-            '/\b(get me (all|the)?)\b/',
-            '/\b(show me (all|the)?)\b/',
-            // Specific entity types (people, companies, products, etc.)
-            '/\b(people|persons?|users?|individuals?|candidates?)\b/',
-            '/\b(developers?|engineers?|designers?|managers?)\b/',
-            '/\b(companies|organizations?|businesses?|vendors?|clients?)\b/',
-            '/\b(products?|services?|tools?|solutions?)\b/',
+            // WHO patterns (people-focused)
+            '/\b(who (knows?|has|uses?|works?))\b/',
+            '/\b(which (people|persons?|users?|developers?|candidates?))\b/',
+            
+            // COUNT/HOW MANY patterns
+            '/\b(how many|count|number of)\s+(people|persons?|users?|developers?|candidates?)\b/',
+            
+            // LIST/FIND patterns (with flexible spacing)
+            '/\b(list|find|get|show)(\s+me)?(\s+list)?(\s+of)?(\s+all)?(\s+the)?(\s+unique)?\s+(people|persons?|users?|developers?|candidates?|companies|vendors?|products?)\b/',
+            '/\b(give\s+me)(\s+list)?(\s+of)?(\s+all)?(\s+the)?(\s+unique)?\s+(people|persons?|users?|developers?|candidates?)\b/',
+            
+            // Entity type at start
+            '/^(people|users?|developers?|candidates?|companies|products?) (who|that|with)\b/',
+            
+            // Unique/All entity queries
+            '/\b(unique|all|every)\s+(people|persons?|users?|developers?)\b/',
         ];
         
+        $hasEntityPattern = false;
         foreach ($whoPatterns as $pattern) {
             if (preg_match($pattern, $query)) {
-                $result['is_entity_query'] = true;
+                $hasEntityPattern = true;
+                break;
+            }
+        }
+        
+        // Check if it's a count query
+        if (preg_match('/\b(how many|count|number of)\b/', $query)) {
+            $result['is_count_query'] = true;
+        }
+        
+        // Only mark as entity query if we have a clear pattern
+        if ($hasEntityPattern) {
+            $result['is_entity_query'] = true;
                 
                 // Determine entity type from query
                 if (preg_match('/\b(people|persons?|users?|individuals?|candidates?|developers?|engineers?|designers?|managers?|employees?)\b/', $query)) {
@@ -59,9 +79,7 @@ class EntitySearchService
                     $result['entity_type'] = 'entity';
                 }
                 
-                $result['confidence'] = 0.9;
-                break;
-            }
+            $result['confidence'] = 0.9;
         }
         
         // 2. Detect query intent (skills, experience, location, etc.)
@@ -110,12 +128,14 @@ class EntitySearchService
     {
         // Remove common question words and prepositions
         $stopWords = [
-            'who', 'what', 'which', 'where', 'when', 'how',
+            'who', 'what', 'which', 'where', 'when', 'how', 'many',
             'knows', 'has', 'have', 'with', 'about', 'the', 'a', 'an',
-            'list', 'all', 'find', 'get', 'show', 'me',
+            'list', 'all', 'find', 'get', 'show', 'me', 'give',
             'people', 'users', 'person', 'user', 'developers', 'candidates',
             'skills', 'skill', 'experience', 'expertise', 'knowledge',
-            'and', 'or', 'in', 'to', 'for', 'as', 'their', 'my'
+            'and', 'or', 'in', 'to', 'for', 'as', 'their', 'my', 'that',
+            'both', 'either', 'neither', 'not', 'but', 'worked', 'works',
+            'based', 'located', 'from', 'at'
         ];
         
         // Extract words from query
@@ -137,11 +157,19 @@ class EntitySearchService
      */
     public static function searchEntities(string $query, array $entityInfo, string $orgId): array
     {
-        // Get all documents in this org
-        // Don't filter by doc_type - search across ALL documents for entities
-        $documents = Document::where('org_id', $orgId)
-            ->with('chunks')
-            ->get();
+        // Get documents based on entity type
+        // For person queries, prioritize resumes but also search other docs
+        $documentsQuery = Document::where('org_id', $orgId)->with('chunks');
+        
+        if ($entityInfo['entity_type'] === 'person') {
+            // For people: get resumes first, then other docs with email addresses
+            $documentsQuery->where(function($q) {
+                $q->whereIn('doc_type', ['resume', 'cv', 'cover_letter'])
+                  ->orWhereNotNull('metadata->emails');
+            });
+        }
+        
+        $documents = $documentsQuery->get();
         
         Log::info('Searching entities', [
             'total_documents' => $documents->count(),
@@ -210,6 +238,11 @@ class EntitySearchService
         // For companies/products: use document title or extract from content
         if ($entityInfo['entity_type'] === 'person') {
             $name = self::extractName($document->title, $allText);
+            
+            // Validate it's a real person name (skip if it looks like a document title)
+            if (!self::looksLikePersonName($name)) {
+                return null; // Skip this document - not a person
+            }
         } else {
             // For non-person entities, use cleaned document title
             $name = self::cleanEntityName($document->title);
@@ -255,6 +288,51 @@ class EntitySearchService
             'summary' => mb_substr($allText, 0, 200) . '...',
             'source_type' => $document->connector->type ?? 'unknown',
         ];
+    }
+    
+    /**
+     * Check if extracted name looks like an actual person name
+     */
+    private static function looksLikePersonName(string $name): bool
+    {
+        // Reject if too long (likely a document title)
+        if (strlen($name) > 50) {
+            return false;
+        }
+        
+        // Reject if contains parentheses (likely document title with metadata)
+        if (str_contains($name, '(') || str_contains($name, ')')) {
+            return false;
+        }
+        
+        // Reject if contains common non-name words
+        $badWords = [
+            'swipe', 'dfy', 'document', 'untitled', 'spreadsheet', 'new', 'project',
+            'programming', 'technical', 'issues', 'certificate', 'links', 'data',
+            'promo', 'contest', 'thanks', 'study', 'odoo', 'fluencegrid'
+        ];
+        
+        $nameLower = strtolower($name);
+        foreach ($badWords as $bad) {
+            if (str_contains($nameLower, $bad)) {
+                return false;
+            }
+        }
+        
+        // Must have at least 2 words
+        $words = explode(' ', trim($name));
+        if (count($words) < 2) {
+            return false;
+        }
+        
+        // Each word should be reasonably short (< 15 chars)
+        foreach ($words as $word) {
+            if (strlen($word) > 15) {
+                return false;
+            }
+        }
+        
+        return true;
     }
     
     /**
@@ -347,19 +425,30 @@ class EntitySearchService
     /**
      * Format entity search results for display
      */
-    public static function formatEntityResults(array $results, string $query): string
+    public static function formatEntityResults(array $results, string $query, bool $isCountQuery = false): string
     {
-        if ($results['total'] === 0) {
-            return "I couldn't find any entities matching your criteria in the knowledge base.";
-        }
-        
-        // Dynamic entity label based on type
+        // Dynamic entity label
         $entityLabel = match($results['entity_type'] ?? 'entity') {
             'person' => $results['total'] === 1 ? 'person' : 'people',
             'company' => $results['total'] === 1 ? 'company' : 'companies',
             'product' => $results['total'] === 1 ? 'product' : 'products',
             default => $results['total'] === 1 ? 'result' : 'results',
         };
+        
+        if ($results['total'] === 0) {
+            return "0 {$entityLabel} in your knowledge base match this criteria.";
+        }
+        
+        // For count queries, provide a concise count-focused response
+        if ($isCountQuery) {
+            $response = "{$results['total']} {$entityLabel} in your knowledge base match this criteria.\n\n";
+            
+            // List just names for count queries
+            $names = array_column($results['entities'], 'name');
+            $response .= "• " . implode("\n• ", $names);
+            
+            return $response;
+        }
         
         $response = "Found {$results['total']} {$entityLabel} matching your query:\n\n";
         

@@ -82,6 +82,33 @@ class ChatController extends Controller
                 'attach_last_answer' => $routing['attach_last_answer'],
             ]);
             
+            // Handle SESSION MEMORY QUERIES (last week, previous conversations)
+            if (\App\Services\ConversationMemoryService::isSessionMemoryQuery($queryText)) {
+                Log::info('Session memory query detected', ['query' => $queryText]);
+                
+                $sessionMemory = new \App\Services\SessionMemoryService();
+                $sessionResults = $sessionMemory->searchUserHistory($user->id, $queryText, 5);
+                $formattedResponse = $sessionMemory->formatSessionResults($sessionResults, $queryText);
+                
+                // Save assistant message
+                Message::create([
+                    'conversation_id' => $conversation->id,
+                    'role' => 'assistant',
+                    'content' => $formattedResponse,
+                    'sources' => [],
+                ]);
+                
+                return response()->json([
+                    'answer' => $formattedResponse,
+                    'sources' => [],
+                    'query' => $queryText,
+                    'result_count' => count($sessionResults),
+                    'conversation_id' => $conversation->id,
+                    'route_type' => 'session_memory',
+                    'session_results' => $sessionResults,
+                ]);
+            }
+            
             // Handle ENTITY QUERIES (who/which people/users)
             $entityInfo = \App\Services\EntitySearchService::isEntityQuery($queryText);
             
@@ -93,7 +120,7 @@ class ChatController extends Controller
                 ]);
                 
                 $entityResults = \App\Services\EntitySearchService::searchEntities($queryText, $entityInfo, $orgId);
-                $formattedResponse = \App\Services\EntitySearchService::formatEntityResults($entityResults, $queryText);
+                $formattedResponse = \App\Services\EntitySearchService::formatEntityResults($entityResults, $queryText, $entityInfo['is_count_query']);
                 
                 // Save assistant message
                 Message::create([
@@ -300,6 +327,15 @@ class ChatController extends Controller
 
             // Update conversation's last message time
             $conversation->update(['last_message_at' => now()]);
+
+            // Check if conversation needs auto-summarization
+            $sessionMemory = new \App\Services\SessionMemoryService();
+            if ($sessionMemory->shouldSummarize($conversation->id)) {
+                // Summarize in background (non-blocking)
+                dispatch(function() use ($conversation, $sessionMemory) {
+                    $sessionMemory->summarizeConversation($conversation->id);
+                })->afterResponse();
+            }
 
             return response()->json([
                 'answer' => $answerText,

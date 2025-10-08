@@ -644,6 +644,35 @@ class IngestConnectorJob implements ShouldQueue
             Log::info('Fetching file list from Dropbox...');
             // List files from Dropbox
             $files = $dropbox->listFiles('', true);
+        } catch (\Exception $e) {
+            // Check if it's an expired token error
+            if (str_contains($e->getMessage(), 'expired_access_token') || str_contains($e->getMessage(), '401')) {
+                Log::info('Dropbox token expired, attempting refresh...');
+                
+                try {
+                    // Refresh the token
+                    $newTokens = $dropbox->refreshAccessToken();
+                    
+                    // Save new tokens
+                    $connector->encrypted_tokens = encrypt(json_encode($newTokens));
+                    $connector->save();
+                    
+                    // Retry with new token
+                    $dropbox = new DropboxService($newTokens['access_token'], $newTokens['refresh_token'] ?? null);
+                    $files = $dropbox->listFiles('', true);
+                    
+                    Log::info('Dropbox token refreshed and retry successful');
+                } catch (\Exception $refreshError) {
+                    Log::error('Dropbox token refresh failed: ' . $refreshError->getMessage());
+                    $errors++;
+                    return [];
+                }
+            } else {
+                throw $e; // Re-throw if not a token issue
+            }
+        }
+        
+        try {
 
             $totalFiles = count($files);
 
