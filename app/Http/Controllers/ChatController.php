@@ -36,17 +36,24 @@ class ChatController extends Controller
                 ->where('user_id', $user->id)
                 ->firstOrFail();
         } else {
-            // Create new conversation with default response style
+            // Create new conversation using user's default response style
+            $userDefaultStyle = $user->default_response_style ?? 'comprehensive';
+            
             $conversation = Conversation::create([
                 'org_id' => $orgId,
                 'user_id' => $user->id,
                 'title' => mb_substr($queryText, 0, 50), // Use first query as title
-                'response_style' => 'comprehensive', // Default style
-                'preferences' => [
+                'response_style' => $userDefaultStyle,
+                'preferences' => array_merge([
                     'detail_level' => 'high',
                     'include_sources' => true,
-                ],
+                ], $user->ai_preferences ?? []),
                 'last_message_at' => now(),
+            ]);
+            
+            Log::info('New conversation created with user default style', [
+                'user_id' => $user->id,
+                'default_style' => $userDefaultStyle
             ]);
         }
 
@@ -58,35 +65,104 @@ class ChatController extends Controller
         ]);
 
         try {
-            // 1. Create embedding for query
+            // 1. INTELLIGENT CONTEXT ROUTING
+            // Get conversation history for routing decision
+            $conversationHistory = \App\Services\ConversationMemoryService::getConversationContext($conversation->id, 10);
+            
+            // Route query to appropriate context sources
+            $routing = \App\Services\ContextRouter::routeQuery($queryText, $conversationHistory);
+            
+            Log::info('Context routing decision', [
+                'query' => $queryText,
+                'route_type' => $routing['route_type'],
+                'confidence' => $routing['confidence'],
+                'reasoning' => $routing['reasoning'],
+                'search_documents' => $routing['search_documents'],
+                'search_messages' => $routing['search_messages'],
+                'attach_last_answer' => $routing['attach_last_answer'],
+            ]);
+            
+            // Handle ENTITY QUERIES (who/which people/users)
+            $entityInfo = \App\Services\EntitySearchService::isEntityQuery($queryText);
+            
+            if ($entityInfo['is_entity_query']) {
+                Log::info('Entity query detected - searching across entities', [
+                    'entity_type' => $entityInfo['entity_type'],
+                    'intent' => $entityInfo['query_intent'],
+                    'skills' => $entityInfo['skill_keywords'],
+                ]);
+                
+                $entityResults = \App\Services\EntitySearchService::searchEntities($queryText, $entityInfo, $orgId);
+                $formattedResponse = \App\Services\EntitySearchService::formatEntityResults($entityResults, $queryText);
+                
+                // Save assistant message
+                Message::create([
+                    'conversation_id' => $conversation->id,
+                    'role' => 'assistant',
+                    'content' => $formattedResponse,
+                    'sources' => [],
+                ]);
+                
+                return response()->json([
+                    'answer' => $formattedResponse,
+                    'sources' => [],
+                    'query' => $queryText,
+                    'result_count' => $entityResults['total'],
+                    'conversation_id' => $conversation->id,
+                    'route_type' => 'entity_search',
+                    'entities' => $entityResults['entities'],
+                ]);
+            }
+            
+            // Handle pure meta-questions (conversation-only queries)
+            if ($routing['route_type'] === 'meta') {
+                $metaResponse = \App\Services\ConversationMemoryService::buildMetaResponse($queryText, $conversationHistory);
+                
+                if ($metaResponse) {
+                    Message::create([
+                        'conversation_id' => $conversation->id,
+                        'role' => 'assistant',
+                        'content' => $metaResponse,
+                        'sources' => [],
+                    ]);
+                    
+                    return response()->json([
+                        'answer' => $metaResponse,
+                        'sources' => [],
+                        'query' => $queryText,
+                        'result_count' => 0,
+                        'conversation_id' => $conversation->id,
+                        'route_type' => 'meta',
+                    ]);
+                }
+            }
+            
+            // 2. Search documents if routing says so
+            $snippets = [];
+            if ($routing['search_documents']) {
             $embedding = $embeddingService->embed($queryText);
-
-            // 2. Query vector store for nearest chunks
                 $matches = $vectorStore->query($embedding, $topK, $orgId);
-
-            // matches expected: array of ['id' => chunk_id, 'score' => float, 'metadata' => [...] ]
             $chunkIds = array_map(fn($m) => $m['id'], $matches);
 
             if (empty($chunkIds)) {
                 return response()->json([
                     'answer' => "I don't know — no relevant documents found.",
                     'sources' => [],
-                    'query' => $queryText,
-                    'result_count' => 0,
-                    'raw' => null
-                ]);
-            }
+                        'query' => $queryText,
+                        'result_count' => 0,
+                        'raw' => null
+                    ]);
+                }
 
-            // 3. Fetch chunk rows
-            $chunks = Chunk::whereIn('id', $chunkIds)
-                ->with(['document' => function($q) {
-                    $q->select('id', 'title', 'source_url', 's3_path', 'org_id', 'connector_id', 'doc_type', 'tags', 'metadata');
-                }, 'document.connector'])
-                ->get()
-                ->keyBy('id');
+                // 3. Fetch chunk rows
+                $chunks = Chunk::whereIn('id', $chunkIds)
+                    ->with(['document' => function($q) {
+                        $q->select('id', 'title', 'source_url', 's3_path', 'org_id', 'connector_id', 'doc_type', 'tags', 'metadata');
+                    }, 'document.connector'])
+                    ->get()
+                    ->keyBy('id');
 
-            // Build an ordered snippets array based on matches
-            $snippets = [];
+                // Build an ordered snippets array based on matches
             foreach ($matches as $m) {
                 $cid = $m['id'];
                 if (!isset($chunks[$cid])) continue;
@@ -97,14 +173,35 @@ class ChatController extends Controller
                     'text' => $c->text,
                     'char_start' => $c->char_start,
                     'char_end' => $c->char_end,
-                    'score' => $m['score'],
-                    'doc_type' => $c->document->doc_type ?? 'general',
-                    'tags' => $c->document->tags ?? [],
-                ];
+                        'score' => $m['score'],
+                        'doc_type' => $c->document->doc_type ?? 'general',
+                        'tags' => $c->document->tags ?? [],
+                    ];
+                }
             }
 
-            // 4. Assemble prompt & call LLM (use conversation's response style)
-            $responseStyle = $conversation->response_style ?? 'comprehensive';
+            // 4. Intelligent Style Selection
+            // First, check if user explicitly requested a style in their query
+            $styleInference = \App\Services\StyleInferenceService::detectExplicitStyleRequest($queryText);
+            
+            if ($styleInference && $styleInference['detected']) {
+                // User explicitly requested a style (e.g., "give me a brief summary")
+                $responseStyle = $styleInference['style'];
+                Log::info('Style explicitly requested in query', [
+                    'keyword' => $styleInference['keyword'],
+                    'style' => $responseStyle
+                ]);
+            } else {
+                // Use AI inference to determine best style based on query patterns
+                $currentStyle = $conversation->response_style ?? 'comprehensive';
+                $responseStyle = \App\Services\StyleInferenceService::getRecommendedStyle($queryText, $currentStyle);
+                
+                Log::info('Style determined via inference', [
+                    'conversation_default' => $currentStyle,
+                    'recommended_style' => $responseStyle,
+                    'query' => $queryText
+                ]);
+            }
             
             Log::info('Using response style for conversation', [
                 'conversation_id' => $conversation->id,
@@ -112,7 +209,18 @@ class ChatController extends Controller
                 'query' => $queryText
             ]);
             
-            $prompt = $rag->assemblePrompt($queryText, $snippets, $responseStyle);
+            // Get enhanced context based on routing decision
+            $enhancedContext = \App\Services\ContextRouter::buildEnhancedContext($routing, $conversation->id, $conversationHistory);
+            
+            // Pass routing metadata to RAG for intelligent prompt building
+            $prompt = $rag->assemblePrompt(
+                $queryText, 
+                $snippets, 
+                $responseStyle, 
+                $enhancedContext['conversation_history'],
+                $routing,
+                $enhancedContext['last_answer']
+            );
             
             // Get max_tokens from response style config
             $styleConfig = \App\Services\ResponseStyleService::getStyleInstructions($responseStyle);
@@ -314,6 +422,7 @@ class ChatController extends Controller
         return response()->json([
             'id' => $conversation->id,
             'title' => $conversation->title,
+            'response_style' => $conversation->response_style ?? 'comprehensive',
             'messages' => $conversation->messages->map(function($msg) {
                 return [
                     'id' => $msg->id,
@@ -400,6 +509,43 @@ class ChatController extends Controller
         
         return response()->json([
             'styles' => $styles,
+        ]);
+    }
+    
+    /**
+     * Update user's default response style preference
+     */
+    public function updateUserPreferences(Request $request)
+    {
+        $validated = $request->validate([
+            'default_response_style' => 'nullable|string|in:comprehensive,structured_profile,summary_report,qa_friendly,bullet_brief,executive_summary',
+            'ai_preferences' => 'nullable|array',
+        ]);
+        
+        $user = $request->user();
+        
+        if (isset($validated['default_response_style'])) {
+            $user->default_response_style = $validated['default_response_style'];
+        }
+        
+        if (isset($validated['ai_preferences'])) {
+            $user->ai_preferences = array_merge($user->ai_preferences ?? [], $validated['ai_preferences']);
+        }
+        
+        $user->save();
+        
+        Log::info('User preferences updated', [
+            'user_id' => $user->id,
+            'default_style' => $user->default_response_style,
+            'preferences' => $user->ai_preferences
+        ]);
+        
+        return response()->json([
+            'message' => 'Preferences updated successfully',
+            'user' => [
+                'default_response_style' => $user->default_response_style,
+                'ai_preferences' => $user->ai_preferences,
+            ]
         ]);
     }
 }

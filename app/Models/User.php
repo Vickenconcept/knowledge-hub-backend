@@ -24,6 +24,8 @@ class User extends Authenticatable
         'password',
         'org_id',
         'role',
+        'default_response_style',
+        'ai_preferences',
     ];
 
     /**
@@ -46,6 +48,7 @@ class User extends Authenticatable
         return [
             'email_verified_at' => 'datetime',
             'twitter_account_connected' => 'boolean',
+            'ai_preferences' => 'array',
         ];
     }
 

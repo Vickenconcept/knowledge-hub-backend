@@ -76,6 +76,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::delete('conversations/{id}', [ChatController::class, 'deleteConversation']);
     Route::patch('conversations/{id}/style', [ChatController::class, 'updateConversationStyle']);
     Route::get('response-styles', [ChatController::class, 'getResponseStyles']);
+    Route::patch('user/preferences', [ChatController::class, 'updateUserPreferences']);
 
     // Connectors
     Route::get('orgs/{org}/connectors', [ConnectorController::class, 'index']);
