@@ -75,8 +75,8 @@ class ChatController extends Controller
             // 3. Fetch chunk rows
             $chunks = Chunk::whereIn('id', $chunkIds)
                 ->with(['document' => function($q) {
-                    $q->select('id', 'title', 'source_url', 's3_path', 'org_id');
-                }])
+                    $q->select('id', 'title', 'source_url', 's3_path', 'org_id', 'connector_id');
+                }, 'document.connector'])
                 ->get()
                 ->keyBy('id');
 
@@ -113,8 +113,8 @@ class ChatController extends Controller
                 if (!$chunk || !$chunk->document) continue;
 
                 // Get connector type to determine source type
-                $connector = Connector::find($chunk->document->connector_id);
-                $sourceType = 'Google Drive'; // Default
+                $connector = $chunk->document->connector;
+                $sourceType = 'Unknown'; // Default
                 if ($connector) {
                     $sourceType = match($connector->type) {
                         'google_drive' => 'Google Drive',

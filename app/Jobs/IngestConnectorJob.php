@@ -347,7 +347,7 @@ class IngestConnectorJob implements ShouldQueue
                     $job->refresh();
                     if ($job->status === 'cancelled') {
                         Log::info('🛑 Job cancelled after download, skipping processing', ['file' => $file->getName()]);
-                        return;
+                        return []; // Return empty array for large files
                     }
 
                     // Upload file to Cloudinary
