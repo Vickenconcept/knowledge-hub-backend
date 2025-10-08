@@ -135,7 +135,7 @@ class RAGService
         return $buf;
     }
 
-    public function callLLM(string $prompt, int $maxTokens = 1500): array
+    public function callLLM(string $prompt, int $maxTokens = 1500, ?string $orgId = null, ?int $userId = null, ?string $conversationId = null, ?string $queryText = null): array
     {
         if (empty($this->openAiKey)) {
             throw new \RuntimeException('OPENAI_API_KEY not configured for RAGService.');
@@ -164,6 +164,25 @@ class RAGService
 
         $json = $resp->json();
         $rawText = $json['choices'][0]['message']['content'] ?? null;
+
+        // Track cost if org_id is provided
+        if ($orgId) {
+            $usage = $json['usage'] ?? [];
+            $tokensInput = $usage['prompt_tokens'] ?? 0;
+            $tokensOutput = $usage['completion_tokens'] ?? 0;
+            
+            if ($tokensInput > 0 || $tokensOutput > 0) {
+                \App\Services\CostTrackingService::trackChat(
+                    $orgId,
+                    $userId,
+                    $this->chatModel,
+                    $tokensInput,
+                    $tokensOutput,
+                    $queryText ?? mb_substr($prompt, 0, 500),
+                    $conversationId
+                );
+            }
+        }
 
         return [
             'answer' => $rawText,

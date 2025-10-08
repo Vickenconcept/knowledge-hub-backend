@@ -39,6 +39,9 @@ class AuthController extends Controller
                 'plan' => 'free',
             ]);
             $orgId = $organization->id;
+            
+            // Auto-assign to Free tier billing
+            \App\Services\SubscriptionService::assignFreeTier($orgId);
         } else {
             $orgId = $validated['org_id'];
         }

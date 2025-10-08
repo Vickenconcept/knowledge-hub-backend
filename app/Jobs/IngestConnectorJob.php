@@ -342,6 +342,15 @@ class IngestConnectorJob implements ShouldQueue
                     // Get file content
                     $content = $driveService->getFileContent($file->getId(), $file->getMimeType());
                     Log::info("File content fetched", ['content_size' => strlen($content)]);
+                    
+                    // Track file pull from Google Drive
+                    \App\Services\CostTrackingService::trackFilePull(
+                        $this->orgId,
+                        'google_drive',
+                        1,
+                        strlen($content),
+                        $job->id
+                    );
 
                     // Check if cancelled after download
                     $job->refresh();
@@ -581,8 +590,11 @@ class IngestConnectorJob implements ShouldQueue
                 // Extract texts for batch embedding
                 $texts = array_map(fn($chunk) => $chunk->text, $batch);
 
-                // Generate embeddings in batch
-                $embeddings = $embeddingService->embedBatch($texts);
+                // Get document ID from first chunk for tracking
+                $documentId = $batch[0]->document_id ?? null;
+
+                // Generate embeddings in batch with cost tracking
+                $embeddings = $embeddingService->embedBatch($texts, $this->orgId, $documentId, $job->id);
 
                 // Prepare vectors for Pinecone
                 $vectors = [];
@@ -598,8 +610,8 @@ class IngestConnectorJob implements ShouldQueue
                     ];
                 }
 
-                // Upsert to Pinecone with org_id as namespace
-                $vectorStore->upsert($vectors, $this->orgId);
+                // Upsert to Pinecone with org_id as namespace and cost tracking
+                $vectorStore->upsert($vectors, $this->orgId, $this->orgId, $documentId, $job->id);
 
                 Log::info("✅ Batch uploaded to Pinecone", [
                     'batch' => $batchIndex + 1,
@@ -644,6 +656,35 @@ class IngestConnectorJob implements ShouldQueue
             Log::info('Fetching file list from Dropbox...');
             // List files from Dropbox
             $files = $dropbox->listFiles('', true);
+        } catch (\Exception $e) {
+            // Check if it's an expired token error
+            if (str_contains($e->getMessage(), 'expired_access_token') || str_contains($e->getMessage(), '401')) {
+                Log::info('Dropbox token expired, attempting refresh...');
+                
+                try {
+                    // Refresh the token
+                    $newTokens = $dropbox->refreshAccessToken();
+                    
+                    // Save new tokens
+                    $connector->encrypted_tokens = encrypt(json_encode($newTokens));
+                    $connector->save();
+                    
+                    // Retry with new token
+                    $dropbox = new DropboxService($newTokens['access_token'], $newTokens['refresh_token'] ?? null);
+                    $files = $dropbox->listFiles('', true);
+                    
+                    Log::info('Dropbox token refreshed and retry successful');
+                } catch (\Exception $refreshError) {
+                    Log::error('Dropbox token refresh failed: ' . $refreshError->getMessage());
+                    $errors++;
+                    return [];
+                }
+            } else {
+                throw $e; // Re-throw if not a token issue
+            }
+        }
+        
+        try {
 
             $totalFiles = count($files);
 
@@ -754,6 +795,15 @@ class IngestConnectorJob implements ShouldQueue
                     // Get file content
                     $content = $dropbox->downloadFile($file['path']);
                     Log::info("File content fetched", ['content_size' => strlen($content)]);
+                    
+                    // Track file pull from Dropbox
+                    \App\Services\CostTrackingService::trackFilePull(
+                        $this->orgId,
+                        'dropbox',
+                        1,
+                        strlen($content),
+                        $job->id
+                    );
 
                     // Check if cancelled after download
                     $job->refresh();

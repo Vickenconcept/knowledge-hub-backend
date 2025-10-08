@@ -24,7 +24,7 @@ class VectorStoreService
         }
     }
 
-    public function upsert(array $vectors, ?string $namespace = null): array
+    public function upsert(array $vectors, ?string $namespace = null, ?string $orgId = null, ?string $documentId = null, ?string $ingestJobId = null): array
     {
         if (empty($this->baseUrl) || empty($this->apiKey) || empty($this->index)) {
             // Graceful: treat as no-op in local/dev
@@ -59,10 +59,16 @@ class VectorStoreService
             // Graceful: don't throw; let ingestion continue
             return [];
         }
+        
+        // Track Pinecone upsert cost if orgId is provided
+        if ($orgId && !empty($vectors)) {
+            \App\Services\CostTrackingService::trackVectorUpsert($orgId, count($vectors), $documentId, $ingestJobId);
+        }
+        
         return $resp->json();
     }
 
-    public function query(array $embedding, int $topK = 6, ?string $namespace = null): array
+    public function query(array $embedding, int $topK = 6, ?string $namespace = null, ?string $orgId = null, ?string $conversationId = null): array
     {
         if (empty($this->baseUrl) || empty($this->apiKey) || empty($this->index)) {
             return [];
@@ -113,6 +119,12 @@ class VectorStoreService
                 ];
             }
         }
+        
+        // Track Pinecone query cost if orgId is provided
+        if ($orgId) {
+            \App\Services\CostTrackingService::trackVectorQuery($orgId, 1, $topK, $conversationId);
+        }
+        
         return $matches;
     }
 

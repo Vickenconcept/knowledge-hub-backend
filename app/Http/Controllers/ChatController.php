@@ -82,6 +82,33 @@ class ChatController extends Controller
                 'attach_last_answer' => $routing['attach_last_answer'],
             ]);
             
+            // Handle SESSION MEMORY QUERIES (last week, previous conversations)
+            if (\App\Services\ConversationMemoryService::isSessionMemoryQuery($queryText)) {
+                Log::info('Session memory query detected', ['query' => $queryText]);
+                
+                $sessionMemory = new \App\Services\SessionMemoryService();
+                $sessionResults = $sessionMemory->searchUserHistory($user->id, $queryText, 5);
+                $formattedResponse = $sessionMemory->formatSessionResults($sessionResults, $queryText);
+                
+                // Save assistant message
+                Message::create([
+                    'conversation_id' => $conversation->id,
+                    'role' => 'assistant',
+                    'content' => $formattedResponse,
+                    'sources' => [],
+                ]);
+                
+                return response()->json([
+                    'answer' => $formattedResponse,
+                    'sources' => [],
+                    'query' => $queryText,
+                    'result_count' => count($sessionResults),
+                    'conversation_id' => $conversation->id,
+                    'route_type' => 'session_memory',
+                    'session_results' => $sessionResults,
+                ]);
+            }
+            
             // Handle ENTITY QUERIES (who/which people/users)
             $entityInfo = \App\Services\EntitySearchService::isEntityQuery($queryText);
             
@@ -93,7 +120,7 @@ class ChatController extends Controller
                 ]);
                 
                 $entityResults = \App\Services\EntitySearchService::searchEntities($queryText, $entityInfo, $orgId);
-                $formattedResponse = \App\Services\EntitySearchService::formatEntityResults($entityResults, $queryText);
+                $formattedResponse = \App\Services\EntitySearchService::formatEntityResults($entityResults, $queryText, $entityInfo['is_count_query']);
                 
                 // Save assistant message
                 Message::create([
@@ -140,8 +167,8 @@ class ChatController extends Controller
             // 2. Search documents if routing says so
             $snippets = [];
             if ($routing['search_documents']) {
-            $embedding = $embeddingService->embed($queryText);
-                $matches = $vectorStore->query($embedding, $topK, $orgId);
+            $embedding = $embeddingService->embed($queryText, $orgId);
+                $matches = $vectorStore->query($embedding, $topK, $orgId, $orgId, $conversation->id);
             $chunkIds = array_map(fn($m) => $m['id'], $matches);
 
             if (empty($chunkIds)) {
@@ -232,7 +259,7 @@ class ChatController extends Controller
                 'detail_level' => $styleConfig['config']['detail_level']
             ]);
             
-            $llmResponse = $rag->callLLM($prompt, $maxTokens);
+            $llmResponse = $rag->callLLM($prompt, $maxTokens, $orgId, $user->id, $conversation->id, $queryText);
 
             // Parse the LLM response (it returns JSON with answer + sources)
             $parsedAnswer = json_decode($llmResponse['answer'] ?? '{}', true);
@@ -244,12 +271,14 @@ class ChatController extends Controller
             $llmSources = is_array($parsedAnswer) ? ($parsedAnswer['sources'] ?? []) : [];
 
             // 5. Format sources with full details (title, URL, excerpt, type)
-            // Map the LLM's numbered sources back to actual chunks
-            $formattedSources = [];
+            // Group by document to avoid duplicate sources
+            $sourcesByDocument = [];
             foreach ($snippets as $idx => $snippet) {
                 $chunk = $chunks[$snippet['chunk_id']] ?? null;
                 if (!$chunk || !$chunk->document) continue;
 
+                $documentId = $snippet['document_id'];
+                
                 // Get connector type to determine source type
                 $connector = $chunk->document->connector;
                 $sourceType = 'Unknown'; // Default
@@ -263,21 +292,59 @@ class ChatController extends Controller
                     };
                 }
 
+                // If document not yet in sources, add it
+                if (!isset($sourcesByDocument[$documentId])) {
+                    $sourcesByDocument[$documentId] = [
+                        'document_id' => $documentId,
+                        'title' => $chunk->document->title,
+                        'url' => $chunk->document->s3_path ?: $chunk->document->source_url,
+                        'excerpts' => [],
+                        'char_ranges' => [],
+                        'scores' => [],
+                        'type' => $sourceType,
+                        'doc_type' => $chunk->document->doc_type,
+                        'tags' => $chunk->document->tags ?? [],
+                        'metadata' => $chunk->document->metadata ?? null,
+                        'chunk_count' => 0,
+                    ];
+                }
+                
+                // Add this chunk's excerpt to the document
+                $sourcesByDocument[$documentId]['excerpts'][] = mb_substr($snippet['text'], 0, 300);
+                $sourcesByDocument[$documentId]['char_ranges'][] = [
+                    'start' => $snippet['char_start'],
+                    'end' => $snippet['char_end']
+                ];
+                $sourcesByDocument[$documentId]['scores'][] = $snippet['score'] ?? 0;
+                $sourcesByDocument[$documentId]['chunk_count']++;
+            }
+
+            // Convert to array and add combined excerpts
+            $formattedSources = [];
+            foreach ($sourcesByDocument as $documentId => $source) {
+                // Combine excerpts with separator, limit to 2-3 most relevant
+                $topExcerpts = array_slice($source['excerpts'], 0, 3);
+                $combinedExcerpt = implode("\n\n...\n\n", $topExcerpts);
+                
                 $formattedSources[] = [
-                    'chunk_id' => $snippet['chunk_id'],
-                    'document_id' => $snippet['document_id'],
-                    'title' => $chunk->document->title,
-                    'url' => $chunk->document->s3_path ?: $chunk->document->source_url, // Use Cloudinary URL if available, fallback to source_url
-                    'excerpt' => mb_substr($snippet['text'], 0, 300),
-                    'char_start' => $snippet['char_start'],
-                    'char_end' => $snippet['char_end'],
-                    'score' => $snippet['score'] ?? null,
-                    'type' => $sourceType,
-                    'doc_type' => $chunk->document->doc_type,
-                    'tags' => $chunk->document->tags ?? [],
-                    'metadata' => $chunk->document->metadata ?? null,
+                    'document_id' => $source['document_id'],
+                    'title' => $source['title'],
+                    'url' => $source['url'],
+                    'excerpt' => $combinedExcerpt,
+                    'char_ranges' => $source['char_ranges'],
+                    'score' => max($source['scores']), // Use highest relevance score
+                    'type' => $source['type'],
+                    'doc_type' => $source['doc_type'],
+                    'tags' => $source['tags'],
+                    'metadata' => $source['metadata'],
+                    'chunk_count' => $source['chunk_count'], // How many chunks from this doc
                 ];
             }
+
+            // Sort by score (highest first)
+            usort($formattedSources, function($a, $b) {
+                return ($b['score'] ?? 0) <=> ($a['score'] ?? 0);
+            });
 
             // Log the query for analytics
             \App\Models\QueryLog::create([
@@ -300,6 +367,15 @@ class ChatController extends Controller
 
             // Update conversation's last message time
             $conversation->update(['last_message_at' => now()]);
+
+            // Check if conversation needs auto-summarization
+            $sessionMemory = new \App\Services\SessionMemoryService();
+            if ($sessionMemory->shouldSummarize($conversation->id)) {
+                // Summarize in background (non-blocking)
+                dispatch(function() use ($conversation, $sessionMemory) {
+                    $sessionMemory->summarizeConversation($conversation->id);
+                })->afterResponse();
+            }
 
             return response()->json([
                 'answer' => $answerText,

@@ -17,6 +17,44 @@ class DropboxService
     }
 
     /**
+     * Refresh expired Dropbox access token
+     */
+    public function refreshAccessToken(): ?array
+    {
+        if (empty($this->refreshToken)) {
+            Log::error('No refresh token available for Dropbox');
+            throw new \Exception('No refresh token available. User needs to re-authenticate.');
+        }
+
+        try {
+            $response = Http::asForm()->post('https://api.dropboxapi.com/oauth2/token', [
+                'grant_type' => 'refresh_token',
+                'refresh_token' => $this->refreshToken,
+                'client_id' => config('services.dropbox.client_id'),
+                'client_secret' => config('services.dropbox.client_secret'),
+            ]);
+
+            if (!$response->successful()) {
+                Log::error('Dropbox token refresh failed', [
+                    'status' => $response->status(),
+                    'body' => $response->body(),
+                ]);
+                throw new \Exception('Failed to refresh Dropbox token');
+            }
+
+            $tokenData = $response->json();
+            $this->accessToken = $tokenData['access_token'];
+
+            Log::info('Dropbox token refreshed successfully');
+
+            return $tokenData;
+        } catch (\Exception $e) {
+            Log::error('Dropbox token refresh exception: ' . $e->getMessage());
+            throw $e;
+        }
+    }
+
+    /**
      * List all files in Dropbox account (recursively)
      */
     public function listFiles(string $path = '', bool $recursive = true): array
