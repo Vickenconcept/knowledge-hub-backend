@@ -120,8 +120,33 @@ class ConnectorController extends Controller
             'org_id' => $request->user()->org_id
         ]);
 
+        $orgId = $request->user()->org_id;
+        
+        // CHECK IF ALREADY AT DOCUMENT LIMIT
+        $docLimit = \App\Services\UsageLimitService::canAddDocument($orgId);
+        if (!$docLimit['allowed']) {
+            return response()->json([
+                'error' => 'Document limit exceeded',
+                'message' => $docLimit['reason'],
+                'current_usage' => $docLimit['current_usage'],
+                'limit' => $docLimit['limit'],
+                'tier' => $docLimit['tier'],
+                'upgrade_required' => true,
+            ], 429);
+        }
+        
+        // Warn if close to limit
+        if ($docLimit['remaining'] && $docLimit['remaining'] < 10) {
+            \Log::warning('Organization close to document limit', [
+                'org_id' => $orgId,
+                'current' => $docLimit['current_usage'],
+                'limit' => $docLimit['limit'],
+                'remaining' => $docLimit['remaining'],
+            ]);
+        }
+
         $connector = Connector::where('id', $id)
-            ->where('org_id', $request->user()->org_id)
+            ->where('org_id', $orgId)
             ->firstOrFail();
 
         \Log::info('Connector found for sync', [

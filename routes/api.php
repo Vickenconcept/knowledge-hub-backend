@@ -13,6 +13,7 @@ use App\Http\Controllers\CostTrackingController;
 use App\Http\Controllers\BillingController;
 use App\Http\Controllers\SubscriptionController;
 use App\Http\Controllers\PricingTierController;
+use App\Http\Controllers\TeamController;
 
 Route::post('auth/register', [AuthController::class, 'register']);
 Route::post('auth/login', [AuthController::class, 'login']);
@@ -139,6 +140,12 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::put('admin/pricing-tiers/{id}', [PricingTierController::class, 'update']);
     Route::post('admin/pricing-tiers/{id}/toggle', [PricingTierController::class, 'toggleActive']);
     Route::delete('admin/pricing-tiers/{id}', [PricingTierController::class, 'destroy']);
+    
+    // Team Management
+    Route::get('team', [TeamController::class, 'index']);
+    Route::post('team/invite', [TeamController::class, 'invite']);
+    Route::put('team/{id}/role', [TeamController::class, 'updateRole']);
+    Route::delete('team/{id}', [TeamController::class, 'remove']);
     
     // DEBUG: Check running jobs
     Route::get('debug/running-jobs', function() {

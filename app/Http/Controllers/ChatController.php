@@ -20,6 +20,33 @@ class ChatController extends Controller
         $user = $request->user();
         $orgId = $user->org_id;
         
+        // CHECK USAGE LIMITS BEFORE PROCESSING
+        $chatLimit = \App\Services\UsageLimitService::canChat($orgId);
+        if (!$chatLimit['allowed']) {
+            return response()->json([
+                'error' => 'Usage limit exceeded',
+                'message' => $chatLimit['reason'],
+                'limit_type' => 'chat_queries',
+                'current_usage' => $chatLimit['current_usage'],
+                'limit' => $chatLimit['limit'],
+                'tier' => $chatLimit['tier'],
+                'upgrade_required' => true,
+            ], 429); // 429 = Too Many Requests
+        }
+        
+        // CHECK MONTHLY SPEND LIMIT
+        $spendLimit = \App\Services\UsageLimitService::isWithinSpendLimit($orgId);
+        if (!$spendLimit['within_limit']) {
+            return response()->json([
+                'error' => 'Monthly spend limit exceeded',
+                'message' => $spendLimit['reason'],
+                'limit_type' => 'monthly_spend',
+                'current_spend' => $spendLimit['current_spend'],
+                'limit' => $spendLimit['limit'],
+                'upgrade_required' => true,
+            ], 429);
+        }
+        
         $validated = $request->validate([
             'query' => 'required|string',
             'conversation_id' => 'nullable|string|uuid',

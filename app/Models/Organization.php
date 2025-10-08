@@ -14,7 +14,7 @@ class Organization extends Model
     protected $keyType = 'string';
 
     protected $fillable = [
-        'id', 'name', 'settings', 'plan'
+        'id', 'name', 'owner_id', 'settings', 'plan'
     ];
 
     protected $casts = [
@@ -43,6 +43,11 @@ class Organization extends Model
     public function documents()
     {
         return $this->hasMany(Document::class, 'org_id');
+    }
+    
+    public function owner()
+    {
+        return $this->belongsTo(User::class, 'owner_id');
     }
 }
 

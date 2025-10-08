@@ -115,6 +115,20 @@ class DocumentController extends Controller
 
         $user = $request->user();
         $orgId = $user->org_id;
+        
+        // CHECK DOCUMENT LIMIT BEFORE UPLOAD
+        $docLimit = \App\Services\UsageLimitService::canAddDocument($orgId);
+        if (!$docLimit['allowed']) {
+            return response()->json([
+                'error' => 'Document limit exceeded',
+                'message' => $docLimit['reason'],
+                'limit_type' => 'max_documents',
+                'current_usage' => $docLimit['current_usage'],
+                'limit' => $docLimit['limit'],
+                'tier' => $docLimit['tier'],
+                'upgrade_required' => true,
+            ], 429);
+        }
 
         $file = $request->file('file');
         $mime = $file->getMimeType();
