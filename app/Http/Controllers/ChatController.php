@@ -36,11 +36,16 @@ class ChatController extends Controller
                 ->where('user_id', $user->id)
                 ->firstOrFail();
         } else {
-            // Create new conversation
+            // Create new conversation with default response style
             $conversation = Conversation::create([
                 'org_id' => $orgId,
                 'user_id' => $user->id,
                 'title' => mb_substr($queryText, 0, 50), // Use first query as title
+                'response_style' => 'comprehensive', // Default style
+                'preferences' => [
+                    'detail_level' => 'high',
+                    'include_sources' => true,
+                ],
                 'last_message_at' => now(),
             ]);
         }
@@ -98,9 +103,15 @@ class ChatController extends Controller
                 ];
             }
 
-            // 4. Assemble prompt & call LLM
-            $prompt = $rag->assemblePrompt($queryText, $snippets);
-            $llmResponse = $rag->callLLM($prompt);
+            // 4. Assemble prompt & call LLM (use conversation's response style)
+            $responseStyle = $conversation->response_style ?? 'comprehensive';
+            $prompt = $rag->assemblePrompt($queryText, $snippets, $responseStyle);
+            
+            // Get max_tokens from response style config
+            $styleConfig = \App\Services\ResponseStyleService::getStyleInstructions($responseStyle);
+            $maxTokens = $styleConfig['config']['max_tokens'] ?? 1500;
+            
+            $llmResponse = $rag->callLLM($prompt, $maxTokens);
 
             // Parse the LLM response (it returns JSON with answer + sources)
             $parsedAnswer = json_decode($llmResponse['answer'] ?? '{}', true);
@@ -345,5 +356,33 @@ class ChatController extends Controller
         }
 
         return $excerpt;
+    }
+    
+    public function updateConversationStyle(Request $request, string $id)
+    {
+        $validated = $request->validate([
+            'response_style' => 'required|string|in:comprehensive,structured_profile,summary_report,qa_friendly,bullet_brief,executive_summary',
+        ]);
+        
+        $conversation = Conversation::where('id', $id)
+            ->where('user_id', $request->user()->id)
+            ->firstOrFail();
+        
+        $conversation->response_style = $validated['response_style'];
+        $conversation->save();
+        
+        return response()->json([
+            'message' => 'Response style updated',
+            'conversation' => $conversation,
+        ]);
+    }
+    
+    public function getResponseStyles()
+    {
+        $styles = \App\Services\ResponseStyleService::getAvailableStyles();
+        
+        return response()->json([
+            'styles' => $styles,
+        ]);
     }
 }

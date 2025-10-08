@@ -18,11 +18,14 @@ class Conversation extends Model
         'org_id',
         'user_id',
         'title',
+        'response_style',
+        'preferences',
         'last_message_at',
     ];
 
     protected $casts = [
         'last_message_at' => 'datetime',
+        'preferences' => 'array',
     ];
 
     protected static function booted(): void

@@ -16,7 +16,7 @@ class RAGService
         $this->chatModel = env('OPENAI_CHAT_MODEL', 'gpt-4o-mini');
     }
 
-    public function assemblePrompt(string $query, array $snippets): string
+    public function assemblePrompt(string $query, array $snippets, string $responseStyle = 'comprehensive'): string
     {
         $maxSnip = 15; // Increased from 6 to 15 for more comprehensive context
         
@@ -78,6 +78,11 @@ class RAGService
         $buf .= "Query Intent: {$intent['primary_intent']} (All: " . implode(', ', $intent['all_intents']) . ")\n";
         $buf .= "Document Types in Context: " . implode(', ', $uniqueTypes) . "\n";
         $buf .= "═══════════════════════════════════════════\n\n";
+        
+        // Add response style instructions
+        $stylePrompt = \App\Services\ResponseStyleService::buildStylePrompt($responseStyle);
+        $buf .= $stylePrompt;
+        
         $buf .= $intentGuidance . "\n";
         $buf .= $contextGuidance . "\n";
         $buf .= $confidenceSummary . "\n";
@@ -111,7 +116,7 @@ class RAGService
         return $buf;
     }
 
-    public function callLLM(string $prompt): array
+    public function callLLM(string $prompt, int $maxTokens = 1500): array
     {
         if (empty($this->openAiKey)) {
             throw new \RuntimeException('OPENAI_API_KEY not configured for RAGService.');
@@ -123,7 +128,7 @@ class RAGService
                 ['role' => 'system', 'content' => 'You are a comprehensive knowledge assistant that provides detailed, thorough answers by synthesizing information from multiple sources.'],
                 ['role' => 'user', 'content' => $prompt],
             ],
-            'max_tokens' => 1500, // Increased from 512 to 1500 for more detailed responses
+            'max_tokens' => $maxTokens, // Dynamic based on response style
             'temperature' => 0.1, // Slightly increased from 0.0 for more natural language
             'response_format' => ['type' => 'json_object'],
         ];
