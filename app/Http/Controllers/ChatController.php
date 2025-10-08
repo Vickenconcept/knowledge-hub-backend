@@ -36,17 +36,24 @@ class ChatController extends Controller
                 ->where('user_id', $user->id)
                 ->firstOrFail();
         } else {
-            // Create new conversation with default response style
+            // Create new conversation using user's default response style
+            $userDefaultStyle = $user->default_response_style ?? 'comprehensive';
+            
             $conversation = Conversation::create([
                 'org_id' => $orgId,
                 'user_id' => $user->id,
                 'title' => mb_substr($queryText, 0, 50), // Use first query as title
-                'response_style' => 'comprehensive', // Default style
-                'preferences' => [
+                'response_style' => $userDefaultStyle,
+                'preferences' => array_merge([
                     'detail_level' => 'high',
                     'include_sources' => true,
-                ],
+                ], $user->ai_preferences ?? []),
                 'last_message_at' => now(),
+            ]);
+            
+            Log::info('New conversation created with user default style', [
+                'user_id' => $user->id,
+                'default_style' => $userDefaultStyle
             ]);
         }
 
@@ -103,8 +110,28 @@ class ChatController extends Controller
                 ];
             }
 
-            // 4. Assemble prompt & call LLM (use conversation's response style)
-            $responseStyle = $conversation->response_style ?? 'comprehensive';
+            // 4. Intelligent Style Selection
+            // First, check if user explicitly requested a style in their query
+            $styleInference = \App\Services\StyleInferenceService::detectExplicitStyleRequest($queryText);
+            
+            if ($styleInference && $styleInference['detected']) {
+                // User explicitly requested a style (e.g., "give me a brief summary")
+                $responseStyle = $styleInference['style'];
+                Log::info('Style explicitly requested in query', [
+                    'keyword' => $styleInference['keyword'],
+                    'style' => $responseStyle
+                ]);
+            } else {
+                // Use AI inference to determine best style based on query patterns
+                $currentStyle = $conversation->response_style ?? 'comprehensive';
+                $responseStyle = \App\Services\StyleInferenceService::getRecommendedStyle($queryText, $currentStyle);
+                
+                Log::info('Style determined via inference', [
+                    'conversation_default' => $currentStyle,
+                    'recommended_style' => $responseStyle,
+                    'query' => $queryText
+                ]);
+            }
             
             Log::info('Using response style for conversation', [
                 'conversation_id' => $conversation->id,
@@ -314,6 +341,7 @@ class ChatController extends Controller
         return response()->json([
             'id' => $conversation->id,
             'title' => $conversation->title,
+            'response_style' => $conversation->response_style ?? 'comprehensive',
             'messages' => $conversation->messages->map(function($msg) {
                 return [
                     'id' => $msg->id,
@@ -400,6 +428,43 @@ class ChatController extends Controller
         
         return response()->json([
             'styles' => $styles,
+        ]);
+    }
+    
+    /**
+     * Update user's default response style preference
+     */
+    public function updateUserPreferences(Request $request)
+    {
+        $validated = $request->validate([
+            'default_response_style' => 'nullable|string|in:comprehensive,structured_profile,summary_report,qa_friendly,bullet_brief,executive_summary',
+            'ai_preferences' => 'nullable|array',
+        ]);
+        
+        $user = $request->user();
+        
+        if (isset($validated['default_response_style'])) {
+            $user->default_response_style = $validated['default_response_style'];
+        }
+        
+        if (isset($validated['ai_preferences'])) {
+            $user->ai_preferences = array_merge($user->ai_preferences ?? [], $validated['ai_preferences']);
+        }
+        
+        $user->save();
+        
+        Log::info('User preferences updated', [
+            'user_id' => $user->id,
+            'default_style' => $user->default_response_style,
+            'preferences' => $user->ai_preferences
+        ]);
+        
+        return response()->json([
+            'message' => 'Preferences updated successfully',
+            'user' => [
+                'default_response_style' => $user->default_response_style,
+                'ai_preferences' => $user->ai_preferences,
+            ]
         ]);
     }
 }
