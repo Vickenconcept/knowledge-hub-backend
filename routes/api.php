@@ -11,6 +11,8 @@ use App\Http\Controllers\IngestJobController;
 use App\Http\Controllers\DropboxController;
 use App\Http\Controllers\CostTrackingController;
 use App\Http\Controllers\BillingController;
+use App\Http\Controllers\SubscriptionController;
+use App\Http\Controllers\PricingTierController;
 
 Route::post('auth/register', [AuthController::class, 'register']);
 Route::post('auth/login', [AuthController::class, 'login']);
@@ -123,6 +125,20 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('billing/pricing-tiers', [BillingController::class, 'getPricingTiers']);
     Route::get('billing/revenue-summary', [BillingController::class, 'getRevenueSummary']);
     Route::post('billing/generate-invoice', [BillingController::class, 'generateInvoice']);
+    
+    // Subscription Management
+    Route::get('subscription/options', [SubscriptionController::class, 'getOptions']);
+    Route::post('subscription/change-plan', [SubscriptionController::class, 'changePlan']);
+    Route::get('subscription/upgrade-recommendation', [SubscriptionController::class, 'getUpgradeRecommendation']);
+    Route::post('subscription/cancel', [SubscriptionController::class, 'cancelSubscription']);
+    
+    // Admin: Pricing Tier Management
+    Route::get('admin/pricing-tiers', [PricingTierController::class, 'index']);
+    Route::get('admin/pricing-tiers/{id}', [PricingTierController::class, 'show']);
+    Route::post('admin/pricing-tiers', [PricingTierController::class, 'store']);
+    Route::put('admin/pricing-tiers/{id}', [PricingTierController::class, 'update']);
+    Route::post('admin/pricing-tiers/{id}/toggle', [PricingTierController::class, 'toggleActive']);
+    Route::delete('admin/pricing-tiers/{id}', [PricingTierController::class, 'destroy']);
     
     // DEBUG: Check running jobs
     Route::get('debug/running-jobs', function() {
