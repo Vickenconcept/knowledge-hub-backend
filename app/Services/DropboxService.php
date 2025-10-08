@@ -171,6 +171,8 @@ class DropboxService
             'pdf' => 'application/pdf',
             'doc' => 'application/msword',
             'docx' => 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            'xlsx' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            'pptx' => 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
             'txt' => 'text/plain',
             'html', 'htm' => 'text/html',
             'md' => 'text/markdown',
@@ -189,10 +191,13 @@ class DropboxService
         $supportedTypes = [
             'application/pdf',
             'application/msword',
-            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document', // DOCX
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', // XLSX
+            'application/vnd.openxmlformats-officedocument.presentationml.presentation', // PPTX
             'text/plain',
             'text/html',
             'text/markdown',
+            'text/csv',
         ];
 
         return in_array($mimeType, $supportedTypes);
