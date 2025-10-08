@@ -20,7 +20,8 @@
         "smalot/pdfparser": "^2.12",
         "spatie/laravel-permission": "^6.20",
         "spatie/laravel-sluggable": "^3.7",
-        "spatie/pdf-to-text": "^1.54"
+        "spatie/pdf-to-text": "^1.54",
+        "stripe/stripe-php": "*"
     },
     "require-dev": {
         "fakerphp/faker": "^1.23",

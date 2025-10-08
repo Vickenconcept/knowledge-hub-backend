@@ -14,9 +14,13 @@ use App\Http\Controllers\BillingController;
 use App\Http\Controllers\SubscriptionController;
 use App\Http\Controllers\PricingTierController;
 use App\Http\Controllers\TeamController;
+use App\Http\Controllers\StripeWebhookController;
 
 Route::post('auth/register', [AuthController::class, 'register']);
 Route::post('auth/login', [AuthController::class, 'login']);
+
+// Stripe Webhook (no auth required)
+Route::post('webhooks/stripe', [StripeWebhookController::class, 'handleWebhook']);
 
 
 
@@ -132,6 +136,10 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('subscription/change-plan', [SubscriptionController::class, 'changePlan']);
     Route::get('subscription/upgrade-recommendation', [SubscriptionController::class, 'getUpgradeRecommendation']);
     Route::post('subscription/cancel', [SubscriptionController::class, 'cancelSubscription']);
+    
+    // Stripe Payment
+    Route::post('payment/setup-intent', [SubscriptionController::class, 'createSetupIntent']);
+    Route::post('payment/process', [SubscriptionController::class, 'processPayment']);
     
     // Admin: Pricing Tier Management
     Route::get('admin/pricing-tiers', [PricingTierController::class, 'index']);

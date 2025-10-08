@@ -320,30 +320,111 @@ class SubscriptionService
      */
     
     /**
-     * Process payment for subscription
-     * To be implemented with Stripe/PayPal
+     * Process payment for subscription upgrade
      */
     public static function processPayment(
         string $orgId,
         string $tierName,
-        string $paymentMethod,
-        array $paymentDetails
+        string $paymentMethodId,
+        string $customerEmail,
+        string $customerName
     ): array {
-        // TODO: Integrate with payment gateway
-        // For now, just mark as paid
-        
-        Log::info('Payment processing placeholder', [
-            'org_id' => $orgId,
-            'tier' => $tierName,
-            'payment_method' => $paymentMethod,
-        ]);
-        
-        return [
-            'success' => true,
-            'transaction_id' => 'PENDING_GATEWAY_INTEGRATION',
-            'amount' => 0,
-            'message' => 'Payment gateway integration pending',
-        ];
+        try {
+            $stripe = new \App\Services\StripeService();
+            
+            // Get tier pricing
+            $tier = DB::table('pricing_tiers')
+                ->where('name', $tierName)
+                ->first();
+            
+            if (!$tier || $tier->monthly_base_fee <= 0) {
+                // Free tier, no payment needed
+                return [
+                    'success' => true,
+                    'transaction_id' => null,
+                    'amount' => 0,
+                    'message' => 'Free tier - no payment required',
+                ];
+            }
+            
+            // Get or create Stripe customer
+            $billing = DB::table('organization_billing')
+                ->where('org_id', $orgId)
+                ->first();
+            
+            $stripeCustomerId = $billing->payment_provider_customer_id ?? null;
+            
+            if (!$stripeCustomerId) {
+                $customerResult = $stripe->createCustomer($customerEmail, $customerName, $orgId);
+                
+                if (!$customerResult['success']) {
+                    throw new \Exception('Failed to create Stripe customer: ' . $customerResult['error']);
+                }
+                
+                $stripeCustomerId = $customerResult['customer_id'];
+            }
+            
+            // Attach payment method to customer
+            $attachResult = $stripe->attachPaymentMethod($stripeCustomerId, $paymentMethodId);
+            
+            if (!$attachResult['success']) {
+                throw new \Exception('Failed to attach payment method: ' . $attachResult['error']);
+            }
+            
+            // Charge the customer
+            $amount = (float) $tier->monthly_base_fee;
+            $description = "Subscription to {$tier->display_name} plan";
+            
+            $chargeResult = $stripe->chargeInvoice(
+                $stripeCustomerId,
+                $amount,
+                $description,
+                [
+                    'org_id' => $orgId,
+                    'tier' => $tierName,
+                    'type' => 'subscription_upgrade',
+                ]
+            );
+            
+            if (!$chargeResult['success']) {
+                throw new \Exception('Payment failed: ' . $chargeResult['error']);
+            }
+            
+            // Update billing record with Stripe customer ID
+            DB::table('organization_billing')
+                ->where('org_id', $orgId)
+                ->update([
+                    'payment_method' => 'stripe',
+                    'payment_provider_customer_id' => $stripeCustomerId,
+                    'updated_at' => now(),
+                ]);
+            
+            Log::info('Payment processed successfully', [
+                'org_id' => $orgId,
+                'tier' => $tierName,
+                'amount' => $amount,
+                'payment_intent_id' => $chargeResult['payment_intent_id'],
+            ]);
+            
+            return [
+                'success' => true,
+                'transaction_id' => $chargeResult['payment_intent_id'],
+                'amount' => $amount,
+                'customer_id' => $stripeCustomerId,
+                'message' => 'Payment successful',
+            ];
+        } catch (\Exception $e) {
+            Log::error('Payment processing failed', [
+                'org_id' => $orgId,
+                'tier' => $tierName,
+                'error' => $e->getMessage(),
+            ]);
+            
+            return [
+                'success' => false,
+                'error' => $e->getMessage(),
+            ];
+        }
     }
     
     /**
