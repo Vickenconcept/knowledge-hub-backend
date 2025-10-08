@@ -9,6 +9,8 @@ use App\Http\Controllers\DocumentController;
 use App\Http\Controllers\AdminController;
 use App\Http\Controllers\IngestJobController;
 use App\Http\Controllers\DropboxController;
+use App\Http\Controllers\CostTrackingController;
+use App\Http\Controllers\BillingController;
 
 Route::post('auth/register', [AuthController::class, 'register']);
 Route::post('auth/login', [AuthController::class, 'login']);
@@ -106,6 +108,21 @@ Route::middleware('auth:sanctum')->group(function () {
 
     // Ingest jobs
     Route::get('ingest-jobs/{id}', [IngestJobController::class, 'show']);
+    
+    // Cost Tracking
+    Route::get('cost-tracking/stats', [CostTrackingController::class, 'getStats']);
+    Route::get('cost-tracking/org-breakdown', [CostTrackingController::class, 'getOrgBreakdown']);
+    Route::get('cost-tracking/history', [CostTrackingController::class, 'getHistory']);
+    Route::post('cost-tracking/estimate', [CostTrackingController::class, 'estimateCost']);
+    
+    // Billing & Revenue
+    Route::get('billing/current', [BillingController::class, 'getCurrentBilling']);
+    Route::get('billing/invoices', [BillingController::class, 'getInvoices']);
+    Route::get('billing/invoices/{id}', [BillingController::class, 'getInvoice']);
+    Route::get('billing/organization', [BillingController::class, 'getOrganizationBilling']);
+    Route::get('billing/pricing-tiers', [BillingController::class, 'getPricingTiers']);
+    Route::get('billing/revenue-summary', [BillingController::class, 'getRevenueSummary']);
+    Route::post('billing/generate-invoice', [BillingController::class, 'generateInvoice']);
     
     // DEBUG: Check running jobs
     Route::get('debug/running-jobs', function() {

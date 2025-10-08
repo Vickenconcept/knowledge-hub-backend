@@ -342,6 +342,15 @@ class IngestConnectorJob implements ShouldQueue
                     // Get file content
                     $content = $driveService->getFileContent($file->getId(), $file->getMimeType());
                     Log::info("File content fetched", ['content_size' => strlen($content)]);
+                    
+                    // Track file pull from Google Drive
+                    \App\Services\CostTrackingService::trackFilePull(
+                        $this->orgId,
+                        'google_drive',
+                        1,
+                        strlen($content),
+                        $job->id
+                    );
 
                     // Check if cancelled after download
                     $job->refresh();
@@ -581,8 +590,11 @@ class IngestConnectorJob implements ShouldQueue
                 // Extract texts for batch embedding
                 $texts = array_map(fn($chunk) => $chunk->text, $batch);
 
-                // Generate embeddings in batch
-                $embeddings = $embeddingService->embedBatch($texts);
+                // Get document ID from first chunk for tracking
+                $documentId = $batch[0]->document_id ?? null;
+
+                // Generate embeddings in batch with cost tracking
+                $embeddings = $embeddingService->embedBatch($texts, $this->orgId, $documentId, $job->id);
 
                 // Prepare vectors for Pinecone
                 $vectors = [];
@@ -598,8 +610,8 @@ class IngestConnectorJob implements ShouldQueue
                     ];
                 }
 
-                // Upsert to Pinecone with org_id as namespace
-                $vectorStore->upsert($vectors, $this->orgId);
+                // Upsert to Pinecone with org_id as namespace and cost tracking
+                $vectorStore->upsert($vectors, $this->orgId, $this->orgId, $documentId, $job->id);
 
                 Log::info("✅ Batch uploaded to Pinecone", [
                     'batch' => $batchIndex + 1,
@@ -783,6 +795,15 @@ class IngestConnectorJob implements ShouldQueue
                     // Get file content
                     $content = $dropbox->downloadFile($file['path']);
                     Log::info("File content fetched", ['content_size' => strlen($content)]);
+                    
+                    // Track file pull from Dropbox
+                    \App\Services\CostTrackingService::trackFilePull(
+                        $this->orgId,
+                        'dropbox',
+                        1,
+                        strlen($content),
+                        $job->id
+                    );
 
                     // Check if cancelled after download
                     $job->refresh();

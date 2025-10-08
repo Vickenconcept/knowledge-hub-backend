@@ -16,7 +16,7 @@ class EmbeddingService
         $this->model = env('OPENAI_EMBEDDING_MODEL', 'text-embedding-3-small');
     }
 
-    public function embed(string $text): array
+    public function embed(string $text, ?string $orgId = null, ?string $documentId = null, ?string $ingestJobId = null): array
     {
         if (empty($this->apiKey)) {
             throw new \RuntimeException('OPENAI_API_KEY not configured.');
@@ -38,10 +38,27 @@ class EmbeddingService
         }
 
         $json = $resp->json();
+        
+        // Track cost if org_id is provided
+        if ($orgId) {
+            $usage = $json['usage'] ?? [];
+            $totalTokens = $usage['total_tokens'] ?? 0;
+            
+            if ($totalTokens > 0) {
+                \App\Services\CostTrackingService::trackEmbedding(
+                    $orgId,
+                    $this->model,
+                    $totalTokens,
+                    $documentId,
+                    $ingestJobId
+                );
+            }
+        }
+        
         return $json['data'][0]['embedding'] ?? [];
     }
 
-    public function embedBatch(array $texts): array
+    public function embedBatch(array $texts, ?string $orgId = null, ?string $documentId = null, ?string $ingestJobId = null): array
     {
         if (empty($this->apiKey)) {
             throw new \RuntimeException('OPENAI_API_KEY not configured.');
@@ -63,6 +80,23 @@ class EmbeddingService
         }
 
         $json = $resp->json();
+        
+        // Track cost if org_id is provided
+        if ($orgId) {
+            $usage = $json['usage'] ?? [];
+            $totalTokens = $usage['total_tokens'] ?? 0;
+            
+            if ($totalTokens > 0) {
+                \App\Services\CostTrackingService::trackEmbedding(
+                    $orgId,
+                    $this->model,
+                    $totalTokens,
+                    $documentId,
+                    $ingestJobId
+                );
+            }
+        }
+        
         return array_map(fn($d) => $d['embedding'] ?? [], $json['data'] ?? []);
     }
 }

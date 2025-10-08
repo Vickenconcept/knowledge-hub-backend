@@ -167,8 +167,8 @@ class ChatController extends Controller
             // 2. Search documents if routing says so
             $snippets = [];
             if ($routing['search_documents']) {
-            $embedding = $embeddingService->embed($queryText);
-                $matches = $vectorStore->query($embedding, $topK, $orgId);
+            $embedding = $embeddingService->embed($queryText, $orgId);
+                $matches = $vectorStore->query($embedding, $topK, $orgId, $orgId, $conversation->id);
             $chunkIds = array_map(fn($m) => $m['id'], $matches);
 
             if (empty($chunkIds)) {
@@ -259,7 +259,7 @@ class ChatController extends Controller
                 'detail_level' => $styleConfig['config']['detail_level']
             ]);
             
-            $llmResponse = $rag->callLLM($prompt, $maxTokens);
+            $llmResponse = $rag->callLLM($prompt, $maxTokens, $orgId, $user->id, $conversation->id, $queryText);
 
             // Parse the LLM response (it returns JSON with answer + sources)
             $parsedAnswer = json_decode($llmResponse['answer'] ?? '{}', true);
