@@ -162,6 +162,25 @@ class CostTrackingService
                     'tokens' => $records->where('operation_type', 'summarization')->sum('total_tokens'),
                     'cost' => $records->where('operation_type', 'summarization')->sum('cost_usd'),
                 ],
+                'vector_query' => [
+                    'count' => $records->where('operation_type', 'vector_query')->count(),
+                    'tokens' => $records->where('operation_type', 'vector_query')->sum('total_tokens'),
+                    'total_tokens' => $records->where('operation_type', 'vector_query')->sum('total_tokens'),
+                    'cost' => $records->where('operation_type', 'vector_query')->sum('cost_usd'),
+                ],
+                'vector_upsert' => [
+                    'count' => $records->where('operation_type', 'vector_upsert')->count(),
+                    'tokens' => $records->where('operation_type', 'vector_upsert')->sum('total_tokens'),
+                    'total_tokens' => $records->where('operation_type', 'vector_upsert')->sum('total_tokens'),
+                    'cost' => $records->where('operation_type', 'vector_upsert')->sum('cost_usd'),
+                ],
+                'file_pull' => [
+                    'count' => $records->where('operation_type', 'file_pull')->count(),
+                    'tokens' => $records->where('operation_type', 'file_pull')->sum('total_tokens'), // KB
+                    'tokens_input' => $records->where('operation_type', 'file_pull')->sum('tokens_input'), // File count
+                    'total_tokens' => $records->where('operation_type', 'file_pull')->sum('total_tokens'), // KB
+                    'cost' => $records->where('operation_type', 'file_pull')->sum('cost_usd'),
+                ],
             ],
             
             'by_model' => $records->groupBy('model_used')->map(function($group) {
