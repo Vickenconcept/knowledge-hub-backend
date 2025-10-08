@@ -43,21 +43,30 @@ class RAGService
         }
 
         // For knowledge-based questions with context
-        $buf = "You are an expert knowledge researcher and analyst. Your role is to deeply analyze all provided documents and synthesize comprehensive, exhaustive answers.\n\n";
+        $buf = "You are an expert knowledge researcher and analyst for an intelligent Knowledge Hub. Your role is to deeply analyze all provided documents and synthesize comprehensive, exhaustive answers across any domain.\n\n";
         $buf .= "AVAILABLE CONTEXT (Review ALL snippets before answering):\n\n";
         $count = 0;
+        $documentTypes = [];
         foreach ($snippets as $s) {
             if ($count >= $maxSnip) break;
             $count++;
             $title = $s['document_id'] ?? 'unknown_doc';
-            $excerpt = mb_substr($s['text'] ?? '', 0, 1200); // Increased from 800 to 1200 characters
-            $buf .= "[{$count}] Document: {$title}\n";
+            $docType = $s['doc_type'] ?? 'general';
+            $documentTypes[] = $docType;
+            $excerpt = mb_substr($s['text'] ?? '', 0, 1200);
+            $buf .= "[{$count}] Document: {$title} (Type: {$docType})\n";
             $buf .= "Content: \"{$excerpt}\"\n";
             $buf .= "Location: chars " . ($s['char_start'] ?? 0) . "-" . ($s['char_end'] ?? 0) . "\n\n";
         }
+        
+        // Add context-aware guidance based on document types present
+        $uniqueTypes = array_unique($documentTypes);
+        $contextGuidance = $this->getContextualGuidance($uniqueTypes, $query);
         $buf .= "═══════════════════════════════════════════\n";
         $buf .= "User Question: \"{$query}\"\n";
+        $buf .= "Document Types in Context: " . implode(', ', $uniqueTypes) . "\n";
         $buf .= "═══════════════════════════════════════════\n\n";
+        $buf .= $contextGuidance . "\n\n";
         $buf .= "CRITICAL INSTRUCTIONS:\n\n";
         $buf .= "1. COMPREHENSIVE COVERAGE:\n";
         $buf .= "   - Read and analyze EVERY SINGLE snippet above (all {$count} documents)\n";
@@ -122,6 +131,60 @@ class RAGService
             'answer' => $rawText,
             'raw' => $json,
         ];
+    }
+    
+    /**
+     * Provide context-aware guidance based on document types
+     */
+    private function getContextualGuidance(array $documentTypes, string $query): string
+    {
+        $guidance = "📚 DOMAIN-AWARE GUIDANCE:\n";
+        
+        // Check what types of documents we have
+        $hasResumes = in_array('resume', $documentTypes) || in_array('cover_letter', $documentTypes);
+        $hasContracts = in_array('contract', $documentTypes);
+        $hasReports = in_array('report', $documentTypes);
+        $hasMeetingNotes = in_array('meeting_notes', $documentTypes);
+        $hasFinancial = in_array('financial', $documentTypes);
+        $hasTechnical = in_array('technical_doc', $documentTypes);
+        
+        if ($hasResumes) {
+            $guidance .= "• Resumes/CVs detected → Focus on: skills, experience, education, projects, accomplishments\n";
+            $guidance .= "  When asked about skills or experience, enumerate ALL items found across all resumes\n";
+        }
+        
+        if ($hasContracts) {
+            $guidance .= "• Contracts detected → Focus on: parties, terms, obligations, dates, clauses, conditions\n";
+            $guidance .= "  Highlight key obligations, payment terms, and important dates\n";
+        }
+        
+        if ($hasReports) {
+            $guidance .= "• Reports detected → Focus on: findings, recommendations, data, metrics, conclusions\n";
+            $guidance .= "  Synthesize key insights and quantitative data\n";
+        }
+        
+        if ($hasMeetingNotes) {
+            $guidance .= "• Meeting notes detected → Focus on: decisions, action items, attendees, topics discussed\n";
+            $guidance .= "  Extract actionable items and key decisions\n";
+        }
+        
+        if ($hasFinancial) {
+            $guidance .= "• Financial documents detected → Focus on: amounts, dates, line items, totals\n";
+            $guidance .= "  Be precise with numbers and dates\n";
+        }
+        
+        if ($hasTechnical) {
+            $guidance .= "• Technical documentation detected → Focus on: features, APIs, configurations, instructions\n";
+            $guidance .= "  Provide code examples or technical specifications when present\n";
+        }
+        
+        // Add multi-source synthesis reminder
+        if (count($documentTypes) > 1) {
+            $guidance .= "• Multiple document types present → Cross-reference and synthesize insights across different sources\n";
+            $guidance .= "  Look for complementary information (e.g., UI/UX resume + Developer resume = complete skill profile)\n";
+        }
+        
+        return $guidance;
     }
 }
 

@@ -75,7 +75,7 @@ class ChatController extends Controller
             // 3. Fetch chunk rows
             $chunks = Chunk::whereIn('id', $chunkIds)
                 ->with(['document' => function($q) {
-                    $q->select('id', 'title', 'source_url', 's3_path', 'org_id', 'connector_id');
+                    $q->select('id', 'title', 'source_url', 's3_path', 'org_id', 'connector_id', 'doc_type', 'tags', 'metadata');
                 }, 'document.connector'])
                 ->get()
                 ->keyBy('id');
@@ -93,6 +93,8 @@ class ChatController extends Controller
                     'char_start' => $c->char_start,
                     'char_end' => $c->char_end,
                     'score' => $m['score'],
+                    'doc_type' => $c->document->doc_type ?? 'general',
+                    'tags' => $c->document->tags ?? [],
                 ];
             }
 
@@ -134,7 +136,10 @@ class ChatController extends Controller
                     'char_start' => $snippet['char_start'],
                     'char_end' => $snippet['char_end'],
                     'score' => $snippet['score'] ?? null,
-                    'type' => $sourceType
+                    'type' => $sourceType,
+                    'doc_type' => $chunk->document->doc_type,
+                    'tags' => $chunk->document->tags ?? [],
+                    'metadata' => $chunk->document->metadata ?? null,
                 ];
             }
 

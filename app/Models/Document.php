@@ -14,11 +14,13 @@ class Document extends Model
     protected $keyType = 'string';
 
     protected $fillable = [
-        'id', 'org_id', 'connector_id', 'title', 'source_url', 'mime_type', 'sha256', 'size', 's3_path', 'fetched_at'
+        'id', 'org_id', 'connector_id', 'title', 'source_url', 'mime_type', 'doc_type', 'metadata', 'summary', 'tags', 'sha256', 'size', 's3_path', 'fetched_at'
     ];
 
     protected $casts = [
         'fetched_at' => 'datetime',
+        'metadata' => 'array',
+        'tags' => 'array',
     ];
 
     protected static function booted(): void

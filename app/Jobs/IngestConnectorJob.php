@@ -394,6 +394,15 @@ class IngestConnectorJob implements ShouldQueue
                     $text = $extractor->extractText($content, $file->getMimeType(), $file->getName());
                     Log::info("Text extracted", ['text_length' => strlen($text)]);
 
+                    // Classify document and extract metadata
+                    $classifier = new \App\Services\DocumentClassificationService();
+                    $classification = $classifier->classifyDocument($text, $file->getName(), $file->getMimeType());
+                    Log::info("Document classified", [
+                        'doc_type' => $classification['doc_type'],
+                        'tags' => $classification['tags'],
+                        'metadata_keys' => array_keys($classification['metadata'])
+                    ]);
+
                     if (empty(trim($text))) {
                         Log::info("⚠️ No text extracted from: " . $file->getName());
                         $skippedFiles++;
@@ -428,6 +437,9 @@ class IngestConnectorJob implements ShouldQueue
                         $existingDocument->update([
                             'title' => $file->getName(),
                             'mime_type' => $file->getMimeType(),
+                            'doc_type' => $classification['doc_type'],
+                            'metadata' => $classification['metadata'],
+                            'tags' => $classification['tags'],
                             'sha256' => $contentHash,
                             'size' => strlen($content),
                             's3_path' => $cloudinaryUrl, // Store Cloudinary URL
@@ -452,6 +464,9 @@ class IngestConnectorJob implements ShouldQueue
                             'title' => $file->getName(),
                             'source_url' => $file->getWebViewLink(),
                             'mime_type' => $file->getMimeType(),
+                            'doc_type' => $classification['doc_type'],
+                            'metadata' => $classification['metadata'],
+                            'tags' => $classification['tags'],
                             'sha256' => $contentHash,
                             'size' => strlen($content),
                             's3_path' => $cloudinaryUrl, // Store Cloudinary URL
@@ -775,6 +790,15 @@ class IngestConnectorJob implements ShouldQueue
                     $text = $extractor->extractText($content, $file['mime_type'], $file['name']);
                     Log::info("Text extracted", ['text_length' => strlen($text)]);
 
+                    // Classify document and extract metadata
+                    $classifier = new \App\Services\DocumentClassificationService();
+                    $classification = $classifier->classifyDocument($text, $file['name'], $file['mime_type']);
+                    Log::info("Document classified", [
+                        'doc_type' => $classification['doc_type'],
+                        'tags' => $classification['tags'],
+                        'metadata_keys' => array_keys($classification['metadata'])
+                    ]);
+
                     if (empty(trim($text))) {
                         Log::info("⚠️ No text extracted from: " . $file['name']);
                         $skippedFiles++;
@@ -809,6 +833,9 @@ class IngestConnectorJob implements ShouldQueue
                         $existingDocument->update([
                             'title' => $file['name'],
                             'mime_type' => $file['mime_type'],
+                            'doc_type' => $classification['doc_type'],
+                            'metadata' => $classification['metadata'],
+                            'tags' => $classification['tags'],
                             'sha256' => $contentHash,
                             'size' => strlen($content),
                             's3_path' => $cloudinaryUrl, // Store Cloudinary URL
@@ -833,6 +860,9 @@ class IngestConnectorJob implements ShouldQueue
                             'title' => $file['name'],
                             'source_url' => $dropboxSourceUrl,
                             'mime_type' => $file['mime_type'],
+                            'doc_type' => $classification['doc_type'],
+                            'metadata' => $classification['metadata'],
+                            'tags' => $classification['tags'],
                             'sha256' => $contentHash,
                             'size' => strlen($content),
                             's3_path' => $cloudinaryUrl, // Store Cloudinary URL
