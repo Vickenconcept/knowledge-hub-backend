@@ -20,6 +20,10 @@ class RAGService
     {
         $maxSnip = 15; // Increased from 6 to 15 for more comprehensive context
         
+        // Detect query intent for context-aware responses
+        $intentService = new \App\Services\QueryIntentService();
+        $intent = $intentService->detectIntent($query);
+        
         // Check if this is a conversational greeting or casual question
         $greetings = ['hello', 'hi', 'hey', 'good morning', 'good afternoon', 'good evening'];
         $isGreeting = false;
@@ -62,11 +66,21 @@ class RAGService
         // Add context-aware guidance based on document types present
         $uniqueTypes = array_unique($documentTypes);
         $contextGuidance = $this->getContextualGuidance($uniqueTypes, $query);
+        $intentGuidance = $intentService->getFormattingInstructions($intent, $uniqueTypes);
+        
+        // Analyze confidence scores for skills/facts
+        $confidenceService = new \App\Services\ConfidenceScoreService();
+        $confidenceAnalysis = $confidenceService->analyzeSnippets($snippets);
+        $confidenceSummary = $confidenceService->getConfidenceSummary($confidenceAnalysis);
+        
         $buf .= "═══════════════════════════════════════════\n";
         $buf .= "User Question: \"{$query}\"\n";
+        $buf .= "Query Intent: {$intent['primary_intent']} (All: " . implode(', ', $intent['all_intents']) . ")\n";
         $buf .= "Document Types in Context: " . implode(', ', $uniqueTypes) . "\n";
         $buf .= "═══════════════════════════════════════════\n\n";
-        $buf .= $contextGuidance . "\n\n";
+        $buf .= $intentGuidance . "\n";
+        $buf .= $contextGuidance . "\n";
+        $buf .= $confidenceSummary . "\n";
         $buf .= "CRITICAL INSTRUCTIONS:\n\n";
         $buf .= "1. COMPREHENSIVE COVERAGE:\n";
         $buf .= "   - Read and analyze EVERY SINGLE snippet above (all {$count} documents)\n";
