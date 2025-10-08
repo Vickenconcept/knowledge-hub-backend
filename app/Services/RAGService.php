@@ -91,28 +91,21 @@ class RAGService
         $buf .= "   - Read and analyze EVERY SINGLE snippet above (all {$count} documents)\n";
         $buf .= "   - Don't stop at the first 2-3 snippets - scan all of them for relevant information\n";
         $buf .= "   - If the question asks for 'all', 'list', 'what skills', etc., enumerate EVERYTHING found\n\n";
-        $buf .= "2. DEPTH & DETAIL:\n";
-        $buf .= "   - Provide 8-15 sentences for detailed questions (not 2-3)\n";
-        $buf .= "   - Include specific technologies, tools, numbers, dates, project names\n";
-        $buf .= "   - Mention accomplishments, certifications, and unique qualifications\n\n";
-        $buf .= "3. INTELLIGENT SYNTHESIS:\n";
-        $buf .= "   - Merge information from multiple documents (e.g., UI/UX resume + Developer resume)\n";
-        $buf .= "   - Group related items logically:\n";
-        $buf .= "     * For skills: Frontend, Backend, UI/UX, DevOps, Soft Skills\n";
-        $buf .= "     * For experience: Chronological order with details\n";
-        $buf .= "     * For projects: Key achievements and technologies used\n";
+        $buf .= "2. INTELLIGENT SYNTHESIS:\n";
+        $buf .= "   - Merge information from multiple documents when they cover the same topic or entity\n";
+        $buf .= "   - Group related items logically by relevant categories (varies by domain)\n";
         $buf .= "   - Eliminate redundancy but retain unique details from each source\n\n";
-        $buf .= "4. STRUCTURED OUTPUT:\n";
-        $buf .= "   - Use clear topic sentences and logical flow\n";
-        $buf .= "   - When listing items, use natural language (not bullet points in the answer text)\n";
-        $buf .= "   - Example: 'His technical skills include React.js, Vue.js, and Next.js for frontend development; Laravel, Django, and Node.js for backend; as well as UI/UX design expertise in Figma and user research.'\n\n";
-        $buf .= "5. COMPLETENESS CHECK:\n";
-        $buf .= "   - Before finalizing your answer, verify you've addressed the question using information from ALL relevant snippets\n";
-        $buf .= "   - If you only used 2-3 snippets but there are 10+, you're probably missing important information!\n\n";
-        $buf .= "6. OUTPUT FORMAT:\n";
-        $buf .= "   - Return STRICT JSON: {\"answer\": \"your detailed response here\", \"sources\": [{\"id\":1, \"document_id\":\"...\", \"char_start\":0, \"char_end\":100}, ...]}\n";
+        $buf .= "3. ADHERENCE TO STYLE:\n";
+        $buf .= "   - STRICTLY follow the Response Style format specified above\n";
+        $buf .= "   - If style is 'bullet_brief', use PLAIN TEXT bullet points (• or -) with NO markdown formatting\n";
+        $buf .= "   - If style is 'comprehensive', use detailed paragraphs (8-15 sentences)\n";
+        $buf .= "   - If style is 'qa_friendly', be direct and conversational (2-4 sentences)\n";
+        $buf .= "   - Match the detail level and structure to the chosen style\n";
+        $buf .= "   - NEVER use markdown syntax (**, ##, ___, etc.) in bullet_brief style\n\n";
+        $buf .= "4. OUTPUT FORMAT:\n";
+        $buf .= "   - Return STRICT JSON: {\"answer\": \"your response here\", \"sources\": [{\"id\":1, \"document_id\":\"...\", \"char_start\":0, \"char_end\":100}, ...]}\n";
         $buf .= "   - In the sources array, list ALL snippet IDs you actually referenced (not just the first one)\n\n";
-        $buf .= "Remember: This is a knowledge hub - users expect comprehensive, researched answers, not brief summaries. Dig deep!\n";
+        $buf .= "Remember: Respect the chosen response style while providing accurate, well-researched answers!\n";
         return $buf;
     }
 
@@ -193,14 +186,14 @@ class RAGService
         }
         
         if ($hasTechnical) {
-            $guidance .= "• Technical documentation detected → Focus on: features, APIs, configurations, instructions\n";
-            $guidance .= "  Provide code examples or technical specifications when present\n";
+            $guidance .= "• Technical documentation detected → Focus on: features, specifications, configurations, instructions, procedures\n";
+            $guidance .= "  Provide specific examples or technical details when present in the documents\n";
         }
         
         // Add multi-source synthesis reminder
         if (count($documentTypes) > 1) {
             $guidance .= "• Multiple document types present → Cross-reference and synthesize insights across different sources\n";
-            $guidance .= "  Look for complementary information (e.g., UI/UX resume + Developer resume = complete skill profile)\n";
+            $guidance .= "  Look for complementary information that creates a more complete picture\n";
         }
         
         return $guidance;

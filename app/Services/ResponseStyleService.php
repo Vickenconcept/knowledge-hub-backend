@@ -67,13 +67,13 @@ class ResponseStyleService
             'comprehensive' => [
                 'format' => 'Provide a comprehensive, detailed answer in paragraph form (8-15 sentences).',
                 'structure' => 'Use clear topic sentences. Group related information logically.',
-                'emphasis' => 'Include specific details, technologies, dates, and accomplishments.',
+                'emphasis' => 'Include specific details, names, dates, numbers, and key facts from the documents.',
             ],
             
             'structured_profile' => [
                 'format' => 'Structure your answer into clear sections with headings (use natural language, not markdown).',
-                'structure' => 'Example: "PROFESSIONAL SUMMARY: ... TECHNICAL SKILLS: Frontend includes React, Vue... EXPERIENCE: Most recently at..."',
-                'emphasis' => 'Organize by logical categories. Use parallel structure for each section.',
+                'structure' => 'Example: "SUMMARY: ... KEY AREAS: Category A includes X, Y, Z... DETAILS: Most relevant information..."',
+                'emphasis' => 'Organize by logical categories relevant to the question. Use parallel structure for each section.',
             ],
             
             'summary_report' => [
@@ -89,9 +89,9 @@ class ResponseStyleService
             ],
             
             'bullet_brief' => [
-                'format' => 'Provide your answer as a bulleted list using natural language (e.g., "Key skills include: React for frontend, Laravel for backend, Docker for containerization").',
-                'structure' => 'Group bullets by category if applicable.',
-                'emphasis' => 'Be concise. Each point should be self-contained.',
+                'format' => 'Provide your answer ONLY as plain text bullet points (use • or - for bullets). NO markdown formatting (no **, no ##, no ___). NO paragraphs or prose.',
+                'structure' => 'Each bullet should be a single line. Group by category with a simple label followed by colon (e.g., "Technical Skills:" then bullets).',
+                'emphasis' => 'Be concise. Each point should be a short phrase or key fact. Use line breaks between bullets, not markdown.',
             ],
             
             'executive_summary' => [

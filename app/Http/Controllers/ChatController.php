@@ -105,17 +105,34 @@ class ChatController extends Controller
 
             // 4. Assemble prompt & call LLM (use conversation's response style)
             $responseStyle = $conversation->response_style ?? 'comprehensive';
+            
+            Log::info('Using response style for conversation', [
+                'conversation_id' => $conversation->id,
+                'response_style' => $responseStyle,
+                'query' => $queryText
+            ]);
+            
             $prompt = $rag->assemblePrompt($queryText, $snippets, $responseStyle);
             
             // Get max_tokens from response style config
             $styleConfig = \App\Services\ResponseStyleService::getStyleInstructions($responseStyle);
             $maxTokens = $styleConfig['config']['max_tokens'] ?? 1500;
             
+            Log::info('Style config loaded', [
+                'style' => $responseStyle,
+                'max_tokens' => $maxTokens,
+                'detail_level' => $styleConfig['config']['detail_level']
+            ]);
+            
             $llmResponse = $rag->callLLM($prompt, $maxTokens);
 
             // Parse the LLM response (it returns JSON with answer + sources)
             $parsedAnswer = json_decode($llmResponse['answer'] ?? '{}', true);
             $answerText = is_array($parsedAnswer) ? ($parsedAnswer['answer'] ?? $llmResponse['answer']) : $llmResponse['answer'];
+            
+            // Convert literal \n to actual newlines for better formatting
+            $answerText = str_replace(['\\n', '\n'], "\n", $answerText);
+            
             $llmSources = is_array($parsedAnswer) ? ($parsedAnswer['sources'] ?? []) : [];
 
             // 5. Format sources with full details (title, URL, excerpt, type)
