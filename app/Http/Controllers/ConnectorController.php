@@ -131,19 +131,7 @@ class ConnectorController extends Controller
             'has_tokens' => !empty($connector->encrypted_tokens)
         ]);
 
-        $job = IngestJob::create([
-            'org_id' => $connector->org_id,
-            'connector_id' => $connector->id,
-            'status' => 'queued',
-            'stats' => ['docs' => 0, 'chunks' => 0, 'errors' => 0],
-        ]);
-
-        \Log::info('IngestJob created', [
-            'job_id' => $job->id,
-            'connector_id' => $connector->id,
-            'status' => 'queued'
-        ]);
-
+        // Dispatch job - the job itself will create the IngestJob record
         IngestConnectorJob::dispatch($connector->id, $request->user()->org_id)->onQueue('default');
 
         \Log::info('IngestConnectorJob dispatched to queue', [
@@ -154,7 +142,67 @@ class ConnectorController extends Controller
 
         return response()->json([
             'message' => 'Ingestion started',
-            'job_id' => $job->id,
+            'job_id' => null, // Job will be created by the job itself
+        ]);
+    }
+
+    public function stopSync(Request $request, string $id)
+    {
+        $connector = Connector::where('id', $id)
+            ->where('org_id', $request->user()->org_id)
+            ->firstOrFail();
+
+        \Log::info('=== STOP SYNC REQUESTED ===', [
+            'connector_id' => $connector->id,
+            'user_id' => $request->user()->id,
+            'current_status' => $connector->status
+        ]);
+
+        // Find any running/queued jobs for this connector
+        $runningJobs = IngestJob::where('connector_id', $connector->id)
+            ->whereIn('status', ['running', 'queued', 'processing_large_files'])
+            ->get();
+
+        if ($runningJobs->isEmpty()) {
+            \Log::info('No running jobs found to stop', ['connector_id' => $connector->id]);
+            return response()->json(['message' => 'No sync in progress'], 400);
+        }
+
+        // Mark all running jobs as cancelled
+        foreach ($runningJobs as $job) {
+            $oldStatus = $job->status;
+            $job->status = 'cancelled';
+            $job->finished_at = now();
+            
+            // Update stats to indicate cancellation
+            $stats = $job->stats ?? [];
+            $stats['cancelled_at'] = now()->toISOString();
+            $stats['cancelled_by'] = $request->user()->id;
+            $stats['current_file'] = 'Cancelled by user';
+            $job->stats = $stats;
+            
+            $job->save();
+
+            \Log::info('IngestJob marked as cancelled', [
+                'job_id' => $job->id,
+                'old_status' => $oldStatus,
+                'new_status' => 'cancelled'
+            ]);
+        }
+
+        // Reset connector status
+        $connector->status = 'connected';
+        $connector->save();
+
+        \Log::info('Connector status reset after sync stop', [
+            'connector_id' => $connector->id,
+            'status' => 'connected'
+        ]);
+
+        return response()->json([
+            'message' => 'Sync stopped successfully',
+            'connector' => $connector,
+            'cancelled_jobs' => $runningJobs->count()
         ]);
     }
 
@@ -283,8 +331,8 @@ class ConnectorController extends Controller
             'has_tokens' => !empty($connector->encrypted_tokens)
         ]);
 
-        // Optionally kick off ingestion immediately
-        IngestConnectorJob::dispatch($connector->id, $connector->org_id)->onQueue('default');
+        // ❌ REMOVED AUTO-TRIGGER: User must manually click "Sync" button
+        // IngestConnectorJob::dispatch($connector->id, $connector->org_id)->onQueue('default');
 
         if ($request->isJson()) {
             return response()->json([

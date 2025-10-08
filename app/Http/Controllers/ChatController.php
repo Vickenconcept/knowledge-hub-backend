@@ -27,7 +27,7 @@ class ChatController extends Controller
         ]);
 
         $queryText = $validated['query'];
-        $topK = $validated['top_k'] ?? 6;
+        $topK = $validated['top_k'] ?? 15; // Increased from 6 to 15 for more comprehensive results
         $conversationId = $validated['conversation_id'] ?? null;
 
         // Get or create conversation
@@ -36,11 +36,16 @@ class ChatController extends Controller
                 ->where('user_id', $user->id)
                 ->firstOrFail();
         } else {
-            // Create new conversation
+            // Create new conversation with default response style
             $conversation = Conversation::create([
                 'org_id' => $orgId,
                 'user_id' => $user->id,
                 'title' => mb_substr($queryText, 0, 50), // Use first query as title
+                'response_style' => 'comprehensive', // Default style
+                'preferences' => [
+                    'detail_level' => 'high',
+                    'include_sources' => true,
+                ],
                 'last_message_at' => now(),
             ]);
         }
@@ -75,8 +80,8 @@ class ChatController extends Controller
             // 3. Fetch chunk rows
             $chunks = Chunk::whereIn('id', $chunkIds)
                 ->with(['document' => function($q) {
-                    $q->select('id', 'title', 'source_url', 'org_id');
-                }])
+                    $q->select('id', 'title', 'source_url', 's3_path', 'org_id', 'connector_id', 'doc_type', 'tags', 'metadata');
+                }, 'document.connector'])
                 ->get()
                 ->keyBy('id');
 
@@ -93,16 +98,41 @@ class ChatController extends Controller
                     'char_start' => $c->char_start,
                     'char_end' => $c->char_end,
                     'score' => $m['score'],
+                    'doc_type' => $c->document->doc_type ?? 'general',
+                    'tags' => $c->document->tags ?? [],
                 ];
             }
 
-            // 4. Assemble prompt & call LLM
-            $prompt = $rag->assemblePrompt($queryText, $snippets);
-            $llmResponse = $rag->callLLM($prompt);
+            // 4. Assemble prompt & call LLM (use conversation's response style)
+            $responseStyle = $conversation->response_style ?? 'comprehensive';
+            
+            Log::info('Using response style for conversation', [
+                'conversation_id' => $conversation->id,
+                'response_style' => $responseStyle,
+                'query' => $queryText
+            ]);
+            
+            $prompt = $rag->assemblePrompt($queryText, $snippets, $responseStyle);
+            
+            // Get max_tokens from response style config
+            $styleConfig = \App\Services\ResponseStyleService::getStyleInstructions($responseStyle);
+            $maxTokens = $styleConfig['config']['max_tokens'] ?? 1500;
+            
+            Log::info('Style config loaded', [
+                'style' => $responseStyle,
+                'max_tokens' => $maxTokens,
+                'detail_level' => $styleConfig['config']['detail_level']
+            ]);
+            
+            $llmResponse = $rag->callLLM($prompt, $maxTokens);
 
             // Parse the LLM response (it returns JSON with answer + sources)
             $parsedAnswer = json_decode($llmResponse['answer'] ?? '{}', true);
             $answerText = is_array($parsedAnswer) ? ($parsedAnswer['answer'] ?? $llmResponse['answer']) : $llmResponse['answer'];
+            
+            // Convert literal \n to actual newlines for better formatting
+            $answerText = str_replace(['\\n', '\n'], "\n", $answerText);
+            
             $llmSources = is_array($parsedAnswer) ? ($parsedAnswer['sources'] ?? []) : [];
 
             // 5. Format sources with full details (title, URL, excerpt, type)
@@ -113,8 +143,8 @@ class ChatController extends Controller
                 if (!$chunk || !$chunk->document) continue;
 
                 // Get connector type to determine source type
-                $connector = Connector::find($chunk->document->connector_id);
-                $sourceType = 'Google Drive'; // Default
+                $connector = $chunk->document->connector;
+                $sourceType = 'Unknown'; // Default
                 if ($connector) {
                     $sourceType = match($connector->type) {
                         'google_drive' => 'Google Drive',
@@ -129,12 +159,15 @@ class ChatController extends Controller
                     'chunk_id' => $snippet['chunk_id'],
                     'document_id' => $snippet['document_id'],
                     'title' => $chunk->document->title,
-                    'url' => $chunk->document->source_url,
+                    'url' => $chunk->document->s3_path ?: $chunk->document->source_url, // Use Cloudinary URL if available, fallback to source_url
                     'excerpt' => mb_substr($snippet['text'], 0, 300),
                     'char_start' => $snippet['char_start'],
                     'char_end' => $snippet['char_end'],
                     'score' => $snippet['score'] ?? null,
-                    'type' => $sourceType
+                    'type' => $sourceType,
+                    'doc_type' => $chunk->document->doc_type,
+                    'tags' => $chunk->document->tags ?? [],
+                    'metadata' => $chunk->document->metadata ?? null,
                 ];
             }
 
@@ -196,7 +229,7 @@ class ChatController extends Controller
             })
             ->where('text', 'like', '%' . $query . '%')
             ->with(['document' => function($q) {
-                $q->select('id', 'title', 'source_url', 'org_id');
+                $q->select('id', 'title', 'source_url', 's3_path', 'org_id');
             }])
             ->limit($topK)
             ->get();
@@ -206,7 +239,7 @@ class ChatController extends Controller
                 return [
                     'document_id' => $chunk->document->id,
                     'title' => $chunk->document->title,
-                    'url' => $chunk->document->source_url,
+                    'url' => $chunk->document->s3_path ?: $chunk->document->source_url, // Use Cloudinary URL if available
                     'excerpt' => $this->extractExcerpt($chunk->text, $query),
                     'char_start' => $chunk->char_start,
                     'char_end' => $chunk->char_end,
@@ -340,5 +373,33 @@ class ChatController extends Controller
         }
 
         return $excerpt;
+    }
+    
+    public function updateConversationStyle(Request $request, string $id)
+    {
+        $validated = $request->validate([
+            'response_style' => 'required|string|in:comprehensive,structured_profile,summary_report,qa_friendly,bullet_brief,executive_summary',
+        ]);
+        
+        $conversation = Conversation::where('id', $id)
+            ->where('user_id', $request->user()->id)
+            ->firstOrFail();
+        
+        $conversation->response_style = $validated['response_style'];
+        $conversation->save();
+        
+        return response()->json([
+            'message' => 'Response style updated',
+            'conversation' => $conversation,
+        ]);
+    }
+    
+    public function getResponseStyles()
+    {
+        $styles = \App\Services\ResponseStyleService::getAvailableStyles();
+        
+        return response()->json([
+            'styles' => $styles,
+        ]);
     }
 }

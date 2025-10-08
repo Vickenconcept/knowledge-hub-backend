@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\ConnectorController;
+use App\Http\Controllers\DropboxController;
 use App\Http\Controllers\PasswordResetController;
 use App\Http\Controllers\ProfileController;
 use Illuminate\Support\Facades\Route;
@@ -14,6 +15,9 @@ Route::get('/', function () {
 
 Route::get('connectors/google-drive/callback', [ConnectorController::class, 'handleGoogleDriveCallback']);
 Route::post('connectors/google-drive/callback', [ConnectorController::class, 'handleGoogleDriveCallback']);
+
+// OAuth Callbacks (public routes - no auth required)
+Route::get('connectors/dropbox/callback', [DropboxController::class, 'callback']);
 
 
 

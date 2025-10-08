@@ -8,9 +8,12 @@ use App\Http\Controllers\ConnectorController;
 use App\Http\Controllers\DocumentController;
 use App\Http\Controllers\AdminController;
 use App\Http\Controllers\IngestJobController;
+use App\Http\Controllers\DropboxController;
 
 Route::post('auth/register', [AuthController::class, 'register']);
 Route::post('auth/login', [AuthController::class, 'login']);
+
+
 
 Route::get('health', function () {
     return response()->json([
@@ -71,17 +74,23 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('conversations', [ChatController::class, 'getConversations']);
     Route::get('conversations/{id}', [ChatController::class, 'getConversation']);
     Route::delete('conversations/{id}', [ChatController::class, 'deleteConversation']);
+    Route::patch('conversations/{id}/style', [ChatController::class, 'updateConversationStyle']);
+    Route::get('response-styles', [ChatController::class, 'getResponseStyles']);
 
     // Connectors
     Route::get('orgs/{org}/connectors', [ConnectorController::class, 'index']);
     Route::post('orgs/{org}/connectors', [ConnectorController::class, 'create']);
     Route::post('connectors/{id}/oauth/callback', [ConnectorController::class, 'oauthCallback']);
     Route::post('connectors/{id}/start-ingest', [ConnectorController::class, 'startIngest']);
+    Route::post('connectors/{id}/stop-sync', [ConnectorController::class, 'stopSync']);
     Route::get('connectors/{connectorId}/job-status', [ConnectorController::class, 'getJobStatus']);
 
     // Google Drive OAuth
     Route::get('connectors/google-drive/auth-url', [ConnectorController::class, 'getGoogleDriveAuthUrl']);
     
+    // Dropbox Integration
+    Route::get('connectors/dropbox/auth-url', [DropboxController::class, 'authUrl']);
+    Route::post('connectors/dropbox/{id}/disconnect', [DropboxController::class, 'disconnect']);
 
     // Documents
     Route::get('documents', [DocumentController::class, 'index']);
@@ -96,4 +105,11 @@ Route::middleware('auth:sanctum')->group(function () {
 
     // Ingest jobs
     Route::get('ingest-jobs/{id}', [IngestJobController::class, 'show']);
+    
+    // DEBUG: Check running jobs
+    Route::get('debug/running-jobs', function() {
+        $jobs = \App\Models\IngestJob::whereIn('status', ['running', 'queued', 'processing_large_files'])
+            ->get(['id', 'connector_id', 'org_id', 'status', 'created_at']);
+        return response()->json(['jobs' => $jobs, 'count' => $jobs->count()]);
+    });
 });
