@@ -14,11 +14,12 @@ class Connector extends Model
     protected $keyType = 'string';
 
     protected $fillable = [
-        'id', 'org_id', 'type', 'label', 'encrypted_tokens', 'status', 'last_synced_at'
+        'id', 'org_id', 'type', 'label', 'encrypted_tokens', 'metadata', 'status', 'last_synced_at'
     ];
 
     protected $casts = [
         'last_synced_at' => 'datetime',
+        'metadata' => 'array',
     ];
 
     protected static function booted(): void

@@ -93,6 +93,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('connectors/{id}/oauth/callback', [ConnectorController::class, 'oauthCallback']);
     Route::post('connectors/{id}/start-ingest', [ConnectorController::class, 'startIngest']);
     Route::post('connectors/{id}/stop-sync', [ConnectorController::class, 'stopSync']);
+    Route::post('connectors/{id}/disconnect', [ConnectorController::class, 'disconnect']);
     Route::get('connectors/{connectorId}/job-status', [ConnectorController::class, 'getJobStatus']);
 
     // Google Drive OAuth
@@ -101,6 +102,9 @@ Route::middleware('auth:sanctum')->group(function () {
     // Dropbox Integration
     Route::get('connectors/dropbox/auth-url', [DropboxController::class, 'authUrl']);
     Route::post('connectors/dropbox/{id}/disconnect', [DropboxController::class, 'disconnect']);
+    
+    // Slack Integration
+    Route::get('connectors/slack/auth-url', [ConnectorController::class, 'getSlackAuthUrl']);
 
     // Documents
     Route::get('documents', [DocumentController::class, 'index']);

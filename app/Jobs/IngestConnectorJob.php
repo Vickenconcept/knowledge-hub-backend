@@ -113,8 +113,16 @@ class IngestConnectorJob implements ShouldQueue
                     'skipped' => $skippedFiles,
                     'large_files_pending' => count($largeFilesInfo)
                 ]);
+            } elseif ($connector->type === 'slack') {
+                Log::info('Starting Slack message ingestion...');
+                $this->processSlackMessages($connector, $tokens, $job, $docs, $chunks, $errors);
+                Log::info('Slack message ingestion completed', [
+                    'docs' => $docs,
+                    'chunks' => $chunks,
+                    'errors' => $errors,
+                ]);
             }
-            // TODO: Add other connector types here (e.g., Slack, Notion)
+            // TODO: Add other connector types here (e.g., Notion)
 
         } catch (\Throwable $e) {
             Log::error("Ingestion error: " . $e->getMessage(), [
@@ -991,5 +999,717 @@ class IngestConnectorJob implements ShouldQueue
 
         // Return large files info for tracking
         return $largeFiles;
+    }
+    
+    /**
+     * Process Slack messages - groups into conversations
+     */
+    private function processSlackMessages($connector, $tokens, $job, &$docs, &$chunks, &$errors): void
+    {
+        Log::info('Processing Slack workspace', [
+            'connector_id' => $connector->id,
+            'org_id' => $this->orgId,
+        ]);
+        
+        try {
+            $slack = new \App\Services\SlackService();
+            
+            // Decrypt and get access token
+            $accessToken = $tokens['access_token'] ?? null;
+            
+            if (!$accessToken) {
+                throw new \Exception('No access token found for Slack connector');
+            }
+
+            // Test auth
+            if (!$slack->testAuth($accessToken)) {
+                throw new \Exception('Slack authentication failed - token may be expired');
+            }
+
+            // Fetch all channels
+            $cursor = null;
+            do {
+                $result = $slack->listChannels($accessToken, $cursor);
+                $channels = $result['channels'];
+                $cursor = $result['next_cursor'];
+
+                foreach ($channels as $channel) {
+                    if ($channel['is_archived']) continue;
+                    
+                    // Try to auto-join public channels
+                    $isPrivate = $channel['is_private'] ?? false;
+                    
+                    if (!$isPrivate) {
+                        $joinResult = $slack->joinChannel($accessToken, $channel['id']);
+                        if ($joinResult['success']) {
+                            Log::info('Bot joined channel', [
+                                'channel_id' => $channel['id'],
+                                'channel_name' => $channel['name'] ?? 'unknown',
+                            ]);
+                        }
+                        
+                        // Rate limiting: wait 1 second between joins
+                        sleep(1);
+                    }
+                    
+                    $messagesIngested = $this->ingestSlackChannel($slack, $accessToken, $channel, $job, $docs, $chunks, $errors);
+                    $docs += $messagesIngested;
+                    
+                    // Rate limiting: wait 2 seconds between channel processing
+                    sleep(2);
+                }
+            } while ($cursor);
+
+        } catch (\Exception $e) {
+            // Handle rate limiting
+            if (strpos($e->getMessage(), 'ratelimited') !== false) {
+                Log::warning('Slack rate limited, will retry on next sync', [
+                    'error' => $e->getMessage(),
+                ]);
+            } else {
+                Log::error('Slack processing failed', [
+                    'error' => $e->getMessage(),
+                ]);
+            }
+            $errors++;
+        }
+    }
+    
+    /**
+     * Ingest messages from a single Slack channel
+     */
+    private function ingestSlackChannel($slack, $accessToken, $channel, $job, &$docs, &$chunks, &$errors): int
+    {
+        $channelId = $channel['id'];
+        $channelName = $channel['name'] ?? 'unknown';
+        
+        Log::info('Processing Slack channel', [
+            'channel_id' => $channelId,
+            'channel_name' => $channelName,
+        ]);
+
+        $allMessages = [];
+        $cursor = null;
+        
+        // Get last sync time for incremental sync
+        $lastSyncDoc = \App\Models\Document::where('org_id', $this->orgId)
+            ->where('connector_id', $this->connectorId)
+            ->where('metadata->channel_id', $channelId)
+            ->orderBy('metadata->last_message_at', 'desc')
+            ->first();
+        
+        $oldest = $lastSyncDoc 
+            ? ($lastSyncDoc->metadata['last_message_at'] ?? null)
+            : null;
+
+        try {
+            // Fetch all messages
+            do {
+                $result = $slack->getChannelHistory(
+                    $accessToken,
+                    $channelId,
+                    $oldest,
+                    null,
+                    $cursor
+                );
+
+                $messages = $result['messages'];
+                $cursor = $result['next_cursor'] ?? null;
+
+                foreach ($messages as $message) {
+                    // Skip bot messages
+                    if ($message['bot_id'] ?? false) {
+                        continue;
+                    }
+                    
+                    // Skip certain system subtypes
+                    $subtype = $message['subtype'] ?? null;
+                    $skipSubtypes = ['channel_join', 'channel_leave', 'channel_archive', 'channel_unarchive'];
+                    if ($subtype && in_array($subtype, $skipSubtypes)) {
+                        continue;
+                    }
+
+                    $allMessages[] = $message;
+                }
+
+            } while ($cursor);
+            
+            // Group messages into conversations
+            $conversations = $this->groupSlackMessages($allMessages, $channel);
+            
+            // Ingest each conversation as a document
+            foreach ($conversations as $conversation) {
+                $this->ingestSlackConversation($channel, $conversation, $job, $chunks);
+            }
+            
+            return count($conversations);
+            
+        } catch (\Exception $e) {
+            // If bot is not in the channel, skip it
+            if (strpos($e->getMessage(), 'not_in_channel') !== false) {
+                Log::warning('Bot not in channel, skipping', [
+                    'channel_id' => $channelId,
+                    'channel_name' => $channelName,
+                ]);
+                return 0;
+            }
+            // Re-throw other errors
+            throw $e;
+        }
+    }
+    
+    /**
+     * Group Slack messages into logical conversations
+     */
+    private function groupSlackMessages(array $messages, array $channel): array
+    {
+        $conversations = [];
+        $threads = [];
+        $standalone = [];
+        
+        // Separate threaded messages from standalone
+        foreach ($messages as $message) {
+            $threadTs = $message['thread_ts'] ?? null;
+            
+            if ($threadTs) {
+                // This is part of a thread
+                if (!isset($threads[$threadTs])) {
+                    $threads[$threadTs] = [];
+                }
+                $threads[$threadTs][] = $message;
+            } else {
+                $standalone[] = $message;
+            }
+        }
+        
+        // Each thread becomes a conversation
+        foreach ($threads as $threadTs => $threadMessages) {
+            $conversations[] = [
+                'type' => 'thread',
+                'thread_ts' => $threadTs,
+                'messages' => $threadMessages,
+            ];
+        }
+        
+        // Group standalone messages by time window (1 hour)
+        usort($standalone, function($a, $b) {
+            return floatval($a['ts']) - floatval($b['ts']);
+        });
+        
+        $currentGroup = [];
+        $lastTimestamp = null;
+        $timeWindow = 3600; // 1 hour in seconds
+        
+        foreach ($standalone as $message) {
+            $timestamp = floatval($message['ts']);
+            
+            if ($lastTimestamp === null || ($timestamp - $lastTimestamp) <= $timeWindow) {
+                // Add to current group
+                $currentGroup[] = $message;
+                $lastTimestamp = $timestamp;
+            } else {
+                // Start new group
+                if (!empty($currentGroup)) {
+                    $conversations[] = [
+                        'type' => 'time_window',
+                        'messages' => $currentGroup,
+                    ];
+                }
+                $currentGroup = [$message];
+                $lastTimestamp = $timestamp;
+            }
+        }
+        
+        // Add remaining group
+        if (!empty($currentGroup)) {
+            $conversations[] = [
+                'type' => 'time_window',
+                'messages' => $currentGroup,
+            ];
+        }
+        
+        return $conversations;
+    }
+    
+    /**
+     * Ingest a Slack conversation (thread or time-grouped messages)
+     */
+    private function ingestSlackConversation(array $channel, array $conversation, $job, &$chunks): void
+    {
+        $channelId = $channel['id'];
+        $channelName = $channel['name'] ?? 'unknown';
+        $messages = $conversation['messages'];
+        
+        if (empty($messages)) {
+            return;
+        }
+        
+        // Sort messages by timestamp
+        usort($messages, function($a, $b) {
+            return floatval($a['ts']) <=> floatval($b['ts']);
+        });
+        
+        $firstMessage = $messages[0];
+        $lastMessage = $messages[count($messages) - 1];
+        
+        // Get Slack API access for user resolution
+        $connector = \App\Models\Connector::find($this->connectorId);
+        $tokens = json_decode(decrypt($connector->encrypted_tokens), true);
+        $accessToken = $tokens['access_token'] ?? null;
+        $slack = new \App\Services\SlackService();
+        
+        // Resolve user IDs to names (cache them)
+        $userCache = [];
+        
+        // Extract metadata
+        $participants = [];
+        $allFiles = [];
+        $allReactions = [];
+        $messageTexts = [];
+        
+        foreach ($messages as $message) {
+            $userId = $message['user'] ?? 'unknown';
+            if ($userId && $userId !== 'unknown') {
+                $participants[$userId] = true;
+                
+                // Resolve user ID to name (with caching)
+                if (!isset($userCache[$userId])) {
+                    try {
+                        $userInfo = $slack->getUserInfo($accessToken, $userId);
+                        $userName = $userInfo['real_name'] ?? $userInfo['name'] ?? $userId;
+                        $userCache[$userId] = $userName;
+                        sleep(0.5); // Rate limit: 0.5s between user lookups
+                    } catch (\Exception $e) {
+                        $userCache[$userId] = $userId; // Fallback to ID
+                    }
+                }
+            }
+            
+            // Collect files
+            if (!empty($message['files'])) {
+                foreach ($message['files'] as $file) {
+                    $sharedByName = $userCache[$userId] ?? $userId;
+                    $allFiles[] = [
+                        'name' => $file['name'] ?? 'Unknown',
+                        'type' => $file['mimetype'] ?? 'unknown',
+                        'url' => $file['url_private'] ?? '',
+                        'shared_by' => $userId,
+                        'shared_by_name' => $sharedByName,
+                    ];
+                }
+            }
+            
+            // Collect reactions
+            if (!empty($message['reactions'])) {
+                foreach ($message['reactions'] as $reaction) {
+                    $allReactions[] = $reaction['name'] ?? '';
+                }
+            }
+            
+            // Build message text with attribution (use real name!)
+            $text = $message['text'] ?? '';
+            $timestamp = date('H:i', (int)floatval($message['ts']));
+            $userName = $userCache[$userId] ?? $userId;
+            $messageTexts[] = "[{$timestamp}] @{$userName}: {$text}";
+        }
+        
+        // Create conversation content
+        $content = "Slack Conversation in #{$channelName}\n";
+        $content .= "Date: " . date('Y-m-d', (int)floatval($firstMessage['ts'])) . "\n";
+        $participantNames = implode(", ", array_map(fn($name) => "@{$name}", array_values($userCache)));
+        $content .= "Participants: {$participantNames}\n";
+        $content .= str_repeat("=", 50) . "\n\n";
+        $content .= implode("\n\n", $messageTexts);
+        
+        // Add files section
+        if (!empty($allFiles)) {
+            $content .= "\n\n" . str_repeat("=", 50) . "\n";
+            $content .= "[Files Shared in This Conversation]\n";
+            foreach ($allFiles as $file) {
+                $sharedByName = $file['shared_by_name'] ?? $file['shared_by'];
+                $content .= "- {$file['name']} ({$file['type']}) shared by @{$sharedByName}\n";
+            }
+        }
+        
+        // Create title
+        $isThread = $conversation['type'] === 'thread';
+        $messageCount = count($messages);
+        
+        if ($isThread) {
+            $title = "Thread in #{$channelName} ({$messageCount} replies)";
+        } else {
+            $title = "Conversation in #{$channelName} (" . date('M d, Y', (int)floatval($firstMessage['ts'])) . ")";
+        }
+        
+        // Generate unique external ID
+        $externalId = $isThread 
+            ? $conversation['thread_ts']
+            : 'timewindow_' . (int)floatval($firstMessage['ts']);
+        
+        // Permalink to first message
+        $permalink = "https://slack.com/archives/{$channelId}/p" . str_replace('.', '', $firstMessage['ts']);
+        
+        // ========================================
+        // SAME AS GOOGLE DRIVE: Classify & Tag
+        // ========================================
+        $classifier = new \App\Services\DocumentClassificationService();
+        $classification = $classifier->classifyDocument($content, $title, 'text/plain');
+        
+        Log::info("Slack conversation classified", [
+            'doc_type' => $classification['doc_type'],
+            'tags' => $classification['tags'],
+        ]);
+        
+        // ========================================
+        // SAME AS GOOGLE DRIVE: Upload to Cloudinary
+        // ========================================
+        $cloudinaryUrl = null;
+        try {
+            $uploader = new \App\Services\FileUploadService();
+            // Create temp file with conversation transcript
+            $tmpPath = sys_get_temp_dir() . '/' . uniqid('slack_') . '.txt';
+            file_put_contents($tmpPath, $content);
+            
+            $upload = $uploader->uploadRawPath($tmpPath, 'knowledgehub/slack');
+            $cloudinaryUrl = $upload['secure_url'] ?? null;
+            
+            @unlink($tmpPath); // Clean up
+            
+            Log::info("Slack conversation uploaded to Cloudinary", [
+                'url' => $cloudinaryUrl,
+            ]);
+        } catch (\Exception $e) {
+            Log::warning("Could not upload to Cloudinary", [
+                'error' => $e->getMessage(),
+            ]);
+        }
+        
+        // ========================================
+        // SAME AS GOOGLE DRIVE: Create Document
+        // ========================================
+        $document = \App\Models\Document::updateOrCreate(
+            [
+                'org_id' => $this->orgId,
+                'connector_id' => $this->connectorId,
+                'external_id' => $externalId,
+            ],
+            [
+                'title' => $title,
+                'source_url' => $permalink,
+                'mime_type' => 'text/plain',
+                'doc_type' => $classification['doc_type'], // AI-classified type
+                'size' => strlen($content),
+                'tags' => $classification['tags'], // AI-generated tags
+                's3_path' => $cloudinaryUrl, // Cloudinary URL (like Google Drive!)
+                'sha256' => hash('sha256', $content),
+                'metadata' => array_merge($classification['metadata'], [ // Merge AI metadata
+                    'channel_id' => $channelId,
+                    'channel_name' => $channelName,
+                    'conversation_type' => $conversation['type'],
+                    'message_count' => $messageCount,
+                    'participants' => array_keys($participants),
+                    'participant_count' => count($participants),
+                    'participant_names' => array_values($userCache), // Real names!
+                    'user_mapping' => $userCache, // ID → Name mapping
+                    'files' => $allFiles,
+                    'file_count' => count($allFiles),
+                    'reactions' => array_unique($allReactions),
+                    'first_message_at' => floatval($firstMessage['ts']),
+                    'last_message_at' => floatval($lastMessage['ts']),
+                    'permalink' => $permalink,
+                    'content' => $content,
+                    'is_thread' => $isThread,
+                    'thread_ts' => $isThread ? $conversation['thread_ts'] : null,
+                ]),
+                'fetched_at' => now(),
+            ]
+        );
+
+        Log::info('Conversation indexed', [
+            'document_id' => $document->id,
+            'type' => $conversation['type'],
+            'messages' => $messageCount,
+            'participants' => count($participants),
+            'files' => count($allFiles),
+        ]);
+
+        // Generate embeddings (using same pattern as Google Drive/Dropbox)
+        $conversationContent = $content;
+        
+        // Create chunks from conversation content
+        $chunkObjects = [];
+        $chunkTexts = $this->chunkSlackConversation($conversationContent);
+        
+        foreach ($chunkTexts as $index => $chunkText) {
+            $chunkObj = \App\Models\Chunk::create([
+                'document_id' => $document->id,
+                'org_id' => $this->orgId,
+                'chunk_index' => $index,
+                'text' => $chunkText,  // ← Fixed: use 'text' not 'content'
+                'token_count' => (int)(str_word_count($chunkText) * 1.3),
+            ]);
+            $chunkObjects[] = $chunkObj;
+            $chunks++; // Increment chunk counter
+        }
+        
+        Log::info('Chunks created for conversation', [
+            'document_id' => $document->id,
+            'chunk_count' => count($chunkObjects),
+        ]);
+        
+        // Use the same embedding method as Google Drive/Dropbox
+        if (!empty($chunkObjects)) {
+            $this->generateAndUploadEmbeddings($chunkObjects, $job);
+        }
+        
+        // ========================================
+        // PROCESS FILES SHARED IN CONVERSATION
+        // ========================================
+        if (!empty($allFiles)) {
+            // Need to pass connector for token access
+            $connector = \App\Models\Connector::find($this->connectorId);
+            $this->processSlackFiles($allFiles, $connector, $channelName, $document->id, $job, $docs, $chunks, $errors);
+        }
+    }
+    
+    /**
+     * Process files shared in Slack conversations
+     */
+    private function processSlackFiles(array $files, $connector, string $channelName, string $conversationDocId, $job, &$docs, &$chunks, &$errors): void
+    {
+        $extractor = new \App\Services\DocumentExtractionService();
+        $uploader = new \App\Services\FileUploadService();
+        $classifier = new \App\Services\DocumentClassificationService();
+        
+        foreach ($files as $fileInfo) {
+            try {
+                $fileName = $fileInfo['name'];
+                $fileUrl = $fileInfo['url'];
+                $mimeType = $fileInfo['type'];
+                $sharedBy = $fileInfo['shared_by'];
+                
+                // Only process text-extractable files
+                $processableTypes = [
+                    'application/pdf',
+                    'application/vnd.openxmlformats-officedocument.wordprocessingml.document', // .docx
+                    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', // .xlsx
+                    'text/plain',
+                    'text/csv',
+                ];
+                
+                if (!in_array($mimeType, $processableTypes)) {
+                    Log::info("Skipping non-text file from Slack", [
+                        'file' => $fileName,
+                        'type' => $mimeType,
+                    ]);
+                    continue;
+                }
+                
+                Log::info("Downloading Slack file", [
+                    'file' => $fileName,
+                    'type' => $mimeType,
+                ]);
+                
+                // Download file from Slack (requires access token)
+                $tokens = json_decode(decrypt($connector->encrypted_tokens), true);
+                $accessToken = $tokens['access_token'] ?? null;
+                
+                $response = \Illuminate\Support\Facades\Http::withHeaders([
+                        'Authorization' => 'Bearer ' . $accessToken,
+                    ])
+                    ->timeout(120)
+                    ->get($fileUrl);
+                
+                if (!$response->successful()) {
+                    Log::error("Failed to download Slack file", [
+                        'file' => $fileName,
+                        'status' => $response->status(),
+                        'url' => $fileUrl,
+                    ]);
+                    $errors++;
+                    continue;
+                }
+                
+                $fileContent = $response->body();
+                
+                Log::info("Slack file downloaded", [
+                    'file' => $fileName,
+                    'size_bytes' => strlen($fileContent),
+                    'is_empty' => empty($fileContent),
+                ]);
+                
+                // Check if file content is empty
+                if (empty($fileContent)) {
+                    Log::error("Downloaded file is empty", [
+                        'file' => $fileName,
+                        'url' => $fileUrl,
+                    ]);
+                    $errors++;
+                    continue;
+                }
+                
+                // Track file pull
+                \App\Services\CostTrackingService::trackFilePull(
+                    $this->orgId,
+                    'slack',
+                    1,
+                    strlen($fileContent),
+                    $job->id
+                );
+                
+                // ========================================
+                // UPLOAD ORIGINAL FILE TO CLOUDINARY FIRST
+                // (Do this BEFORE text extraction, so we keep the file even if extraction fails)
+                // ========================================
+                $tmpPath = sys_get_temp_dir() . '/' . uniqid('slack_file_') . '_' . basename($fileName);
+                $bytesWritten = file_put_contents($tmpPath, $fileContent);
+                
+                Log::info("Temp file created for Cloudinary upload", [
+                    'file' => $fileName,
+                    'tmp_path' => $tmpPath,
+                    'original_size' => strlen($fileContent),
+                    'bytes_written' => $bytesWritten,
+                    'file_exists' => file_exists($tmpPath),
+                    'actual_size' => file_exists($tmpPath) ? filesize($tmpPath) : 0,
+                ]);
+                
+                $upload = $uploader->uploadRawPath($tmpPath, 'knowledgehub/slack/files');
+                $fileCloudinaryUrl = $upload['secure_url'] ?? null;
+                
+                Log::info("Slack file uploaded to Cloudinary", [
+                    'file' => $fileName,
+                    'url' => $fileCloudinaryUrl,
+                    'upload_response' => $upload,
+                ]);
+                
+                // ========================================
+                // NOW EXTRACT TEXT FOR SEARCHING
+                // ========================================
+                $text = $extractor->extractText($fileContent, $mimeType, $fileName);
+                Log::info("Text extracted from Slack file", [
+                    'text_length' => strlen($text),
+                    'file' => $fileName,
+                ]);
+                
+                // If text extraction failed, use fallback text
+                if (empty(trim($text))) {
+                    Log::warning("No text extracted from Slack file, using fallback", [
+                        'file' => $fileName,
+                    ]);
+                    $text = "File: {$fileName}\nType: {$mimeType}\nShared in Slack #{$channelName}\nNote: Text extraction failed, but original file is available.";
+                }
+                
+                // Classify document
+                $fileClassification = $classifier->classifyDocument($text, $fileName, $mimeType);
+                Log::info("Slack file classified", [
+                    'file' => $fileName,
+                    'doc_type' => $fileClassification['doc_type'],
+                    'tags' => $fileClassification['tags'],
+                ]);
+                
+                // Clean up temp file
+                @unlink($tmpPath);
+                
+                // Create document for the file
+                $fileDocument = \App\Models\Document::create([
+                    'org_id' => $this->orgId,
+                    'connector_id' => $this->connectorId,
+                    'external_id' => 'slack_file_' . basename($fileUrl),
+                    'title' => $fileName,
+                    'source_url' => $fileUrl,
+                    'mime_type' => $mimeType,
+                    'doc_type' => $fileClassification['doc_type'],
+                    'size' => strlen($text),
+                    'tags' => $fileClassification['tags'],
+                    's3_path' => $fileCloudinaryUrl,
+                    'sha256' => hash('sha256', $fileContent),
+                    'metadata' => array_merge($fileClassification['metadata'], [
+                        'shared_in_slack' => true,
+                        'channel_name' => $channelName,
+                        'shared_by' => $sharedBy,
+                        'conversation_document_id' => $conversationDocId,
+                    ]),
+                    'fetched_at' => now(),
+                ]);
+                
+                Log::info("Slack file document created", [
+                    'document_id' => $fileDocument->id,
+                    'file' => $fileName,
+                ]);
+                
+                // Chunk and embed the file (SAME AS GOOGLE DRIVE!)
+                $textChunks = $extractor->chunkText($text);
+                Log::info("Slack file chunked", ['chunk_count' => count($textChunks)]);
+                
+                $createdChunks = [];
+                foreach ($textChunks as $index => $chunkText) {
+                    $chunk = \App\Models\Chunk::create([
+                        'id' => (string) \Illuminate\Support\Str::uuid(),
+                        'org_id' => $this->orgId,
+                        'document_id' => $fileDocument->id,
+                        'chunk_index' => $index,
+                        'text' => $chunkText,
+                        'char_start' => $index * 2000,
+                        'char_end' => ($index + 1) * 2000,
+                        'token_count' => str_word_count($chunkText),
+                    ]);
+                    $createdChunks[] = $chunk;
+                    $chunks++;
+                }
+                
+                if (!empty($createdChunks)) {
+                    $this->generateAndUploadEmbeddings($createdChunks, $job);
+                }
+                
+                $docs++;
+                
+                // Rate limiting: wait between file downloads
+                sleep(2);
+                
+            } catch (\Exception $e) {
+                Log::error("Failed to process Slack file", [
+                    'file' => $fileName ?? 'unknown',
+                    'error' => $e->getMessage(),
+                ]);
+                $errors++;
+            }
+        }
+    }
+    
+    /**
+     * Chunk Slack conversation content
+     */
+    private function chunkSlackConversation(string $content): array
+    {
+        if (empty($content)) {
+            return [];
+        }
+        
+        // For short conversations, return as single chunk
+        if (strlen($content) < 2000) {
+            return [$content];
+        }
+        
+        // For longer conversations, split by message boundaries
+        $lines = explode("\n\n", $content);
+        $chunks = [];
+        $currentChunk = '';
+        
+        foreach ($lines as $line) {
+            if (strlen($currentChunk . $line) > 1500) {
+                if ($currentChunk) {
+                    $chunks[] = trim($currentChunk);
+                }
+                $currentChunk = $line . "\n\n";
+            } else {
+                $currentChunk .= $line . "\n\n";
+            }
+        }
+        
+        if ($currentChunk) {
+            $chunks[] = trim($currentChunk);
+        }
+        
+        return $chunks;
     }
 }

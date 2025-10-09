@@ -18,6 +18,7 @@ Route::post('connectors/google-drive/callback', [ConnectorController::class, 'ha
 
 // OAuth Callbacks (public routes - no auth required)
 Route::get('connectors/dropbox/callback', [DropboxController::class, 'callback']);
+Route::get('connectors/slack/callback', [ConnectorController::class, 'handleSlackCallback']);
 
 
 
