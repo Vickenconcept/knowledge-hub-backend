@@ -327,9 +327,17 @@ class SubscriptionService
         string $tierName,
         string $paymentMethodId,
         string $customerEmail,
-        string $customerName
+        string $customerName,
+        ?string $stripeCustomerId = null
     ): array {
         try {
+            Log::info('Starting payment process', [
+                'org_id' => $orgId,
+                'tier' => $tierName,
+                'payment_method_id' => $paymentMethodId,
+                'stripe_customer_id' => $stripeCustomerId,
+            ]);
+            
             $stripe = new \App\Services\StripeService();
             
             // Get tier pricing
@@ -347,28 +355,52 @@ class SubscriptionService
                 ];
             }
             
-            // Get or create Stripe customer
-            $billing = DB::table('organization_billing')
-                ->where('org_id', $orgId)
-                ->first();
-            
-            $stripeCustomerId = $billing->payment_provider_customer_id ?? null;
-            
+            // Use provided customer ID or get/create one
             if (!$stripeCustomerId) {
-                $customerResult = $stripe->createCustomer($customerEmail, $customerName, $orgId);
+                $billing = DB::table('organization_billing')
+                    ->where('org_id', $orgId)
+                    ->first();
                 
-                if (!$customerResult['success']) {
-                    throw new \Exception('Failed to create Stripe customer: ' . $customerResult['error']);
+                $stripeCustomerId = $billing->payment_provider_customer_id ?? null;
+                
+                if (!$stripeCustomerId) {
+                    $customerResult = $stripe->createCustomer($customerEmail, $customerName, $orgId);
+                    
+                    if (!$customerResult['success']) {
+                        throw new \Exception('Failed to create Stripe customer: ' . $customerResult['error']);
+                    }
+                    
+                    $stripeCustomerId = $customerResult['customer_id'];
                 }
-                
-                $stripeCustomerId = $customerResult['customer_id'];
             }
             
-            // Attach payment method to customer
-            $attachResult = $stripe->attachPaymentMethod($stripeCustomerId, $paymentMethodId);
+            // Update billing record with customer ID
+            DB::table('organization_billing')
+                ->where('org_id', $orgId)
+                ->update([
+                    'payment_provider_customer_id' => $stripeCustomerId,
+                    'updated_at' => now(),
+                ]);
             
-            if (!$attachResult['success']) {
-                throw new \Exception('Failed to attach payment method: ' . $attachResult['error']);
+            // Payment method is already attached via confirmCardSetup
+            // Just set it as the default payment method
+            try {
+                \Stripe\Stripe::setApiKey(config('services.stripe.secret'));
+                \Stripe\Customer::update($stripeCustomerId, [
+                    'invoice_settings' => [
+                        'default_payment_method' => $paymentMethodId,
+                    ],
+                ]);
+                
+                Log::info('Set payment method as default', [
+                    'customer_id' => $stripeCustomerId,
+                    'payment_method_id' => $paymentMethodId,
+                ]);
+            } catch (\Exception $e) {
+                Log::warning('Could not set default payment method (will continue anyway)', [
+                    'error' => $e->getMessage(),
+                ]);
+                // Don't fail the payment if we can't set default, we can still charge
             }
             
             // Charge the customer
@@ -383,7 +415,8 @@ class SubscriptionService
                     'org_id' => $orgId,
                     'tier' => $tierName,
                     'type' => 'subscription_upgrade',
-                ]
+                ],
+                $paymentMethodId  // Use the payment method from confirmCardSetup
             );
             
             if (!$chargeResult['success']) {

@@ -151,21 +151,31 @@ class StripeService
         string $customerId,
         float $amount,
         string $description,
-        array $metadata = []
+        array $metadata = [],
+        ?string $paymentMethodId = null
     ): array {
         try {
-            $paymentIntent = PaymentIntent::create([
+            $intentParams = [
                 'amount' => (int) ($amount * 100),
                 'currency' => 'usd',
                 'customer' => $customerId,
                 'description' => $description,
                 'metadata' => $metadata,
                 'confirm' => true,
-                'automatic_payment_methods' => [
+            ];
+            
+            // If payment method specified, use it; otherwise use automatic
+            if ($paymentMethodId) {
+                $intentParams['payment_method'] = $paymentMethodId;
+                $intentParams['off_session'] = true;  // Allow charging saved cards
+            } else {
+                $intentParams['automatic_payment_methods'] = [
                     'enabled' => true,
                     'allow_redirects' => 'never',
-                ],
-            ]);
+                ];
+            }
+            
+            $paymentIntent = PaymentIntent::create($intentParams);
             
             $success = $paymentIntent->status === 'succeeded';
             
@@ -224,18 +234,28 @@ class StripeService
     {
         try {
             $paymentMethod = \Stripe\PaymentMethod::retrieve($paymentMethodId);
-            $paymentMethod->attach(['customer' => $customerId]);
             
-            // Set as default
+            // Check if payment method is already attached to this customer
+            if ($paymentMethod->customer !== $customerId) {
+                // Only attach if not already attached to this customer
+                $paymentMethod->attach(['customer' => $customerId]);
+                
+                Log::info('Payment method attached', [
+                    'customer_id' => $customerId,
+                    'payment_method_id' => $paymentMethodId,
+                ]);
+            } else {
+                Log::info('Payment method already attached to customer', [
+                    'customer_id' => $customerId,
+                    'payment_method_id' => $paymentMethodId,
+                ]);
+            }
+            
+            // Set as default payment method
             Customer::update($customerId, [
                 'invoice_settings' => [
                     'default_payment_method' => $paymentMethodId,
                 ],
-            ]);
-            
-            Log::info('Payment method attached', [
-                'customer_id' => $customerId,
-                'payment_method_id' => $paymentMethodId,
             ]);
             
             return [
@@ -243,8 +263,41 @@ class StripeService
                 'payment_method' => $paymentMethod,
             ];
         } catch (\Exception $e) {
+            // Check if the error is about payment method already being attached
+            if (strpos($e->getMessage(), 'already been attached') !== false) {
+                // If already attached, just set it as default and continue
+                try {
+                    Customer::update($customerId, [
+                        'invoice_settings' => [
+                            'default_payment_method' => $paymentMethodId,
+                        ],
+                    ]);
+                    
+                    Log::info('Payment method was already attached, set as default', [
+                        'customer_id' => $customerId,
+                        'payment_method_id' => $paymentMethodId,
+                    ]);
+                    
+                    return [
+                        'success' => true,
+                        'payment_method' => \Stripe\PaymentMethod::retrieve($paymentMethodId),
+                    ];
+                } catch (\Exception $updateError) {
+                    Log::error('Failed to set default payment method', [
+                        'error' => $updateError->getMessage(),
+                    ]);
+                    
+                    return [
+                        'success' => false,
+                        'error' => $updateError->getMessage(),
+                    ];
+                }
+            }
+            
             Log::error('Failed to attach payment method', [
                 'error' => $e->getMessage(),
+                'customer_id' => $customerId,
+                'payment_method_id' => $paymentMethodId,
             ]);
             
             return [

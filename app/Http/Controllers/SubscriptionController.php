@@ -193,6 +193,7 @@ class SubscriptionController extends Controller
         $request->validate([
             'tier_name' => 'required|string',
             'payment_method_id' => 'required|string',
+            'customer_id' => 'nullable|string',
         ]);
         
         try {
@@ -205,7 +206,8 @@ class SubscriptionController extends Controller
                 $request->tier_name,
                 $request->payment_method_id,
                 $user->email,
-                $org->name
+                $org->name,
+                $request->customer_id
             );
             
             if (!$result['success']) {
@@ -215,7 +217,8 @@ class SubscriptionController extends Controller
             }
             
             // Change plan after successful payment
-            $planResult = SubscriptionService::changePlan($user->org_id, $request->tier_name);
+            // Pass 'stripe' as payment method since we just successfully charged
+            $planResult = SubscriptionService::changePlan($user->org_id, $request->tier_name, 'stripe');
             
             return response()->json([
                 'success' => true,
