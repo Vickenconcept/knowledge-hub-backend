@@ -1028,37 +1028,139 @@ class IngestConnectorJob implements ShouldQueue
 
             // Fetch all channels
             $cursor = null;
+            $channelCount = 0;
+            $maxChannelsPerBatch = 10; // Process 10 channels per batch, then take a 10s break
+            
+            // Get list of channels we've already joined (from connector metadata)
+            $joinedChannels = $connector->metadata['joined_channels'] ?? [];
+            
+            $totalProcessed = 0;
+            $batchNumber = 1;
+            
             do {
                 $result = $slack->listChannels($accessToken, $cursor);
                 $channels = $result['channels'];
                 $cursor = $result['next_cursor'];
+                
+                // Rate limiting: wait after fetching channel list
+                sleep(5);
 
                 foreach ($channels as $channel) {
                     if ($channel['is_archived']) continue;
                     
-                    // Try to auto-join public channels
-                    $isPrivate = $channel['is_private'] ?? false;
+                    $channelId = $channel['id'];
                     
-                    if (!$isPrivate) {
-                        $joinResult = $slack->joinChannel($accessToken, $channel['id']);
-                        if ($joinResult['success']) {
-                            Log::info('Bot joined channel', [
-                                'channel_id' => $channel['id'],
-                                'channel_name' => $channel['name'] ?? 'unknown',
-                            ]);
-                        }
+                    // Limit channels per batch to avoid rate limits
+                    if ($channelCount >= $maxChannelsPerBatch) {
+                        Log::info('Batch limit reached, taking a break before continuing', [
+                            'batch_number' => $batchNumber,
+                            'processed_in_batch' => $channelCount,
+                            'total_processed' => $totalProcessed,
+                            'max_per_batch' => $maxChannelsPerBatch,
+                            'cooldown_seconds' => 30,
+                        ]);
                         
-                        // Rate limiting: wait 1 second between joins
-                        sleep(1);
+                        // Reset counter and take a 30-second break before continuing
+                        $channelCount = 0;
+                        $batchNumber++;
+                        sleep(30); // Cooldown period between batches (longer to avoid rate limits)
+                        
+                        Log::info('Cooldown complete, continuing with next batch', [
+                            'next_batch_number' => $batchNumber,
+                        ]);
+                        // Don't break, continue processing next batch
                     }
                     
-                    $messagesIngested = $this->ingestSlackChannel($slack, $accessToken, $channel, $job, $docs, $chunks, $errors);
-                    $docs += $messagesIngested;
+                    $channelCount++;
+                    $totalProcessed++;
                     
-                    // Rate limiting: wait 2 seconds between channel processing
-                    sleep(2);
+                    // Try to auto-join public channels (skip if already joined)
+                    $isPrivate = $channel['is_private'] ?? false;
+                    
+                    if (!$isPrivate && !in_array($channelId, $joinedChannels)) {
+                        $maxRetries = 3;
+                        $attempt = 0;
+                        
+                        while ($attempt < $maxRetries) {
+                            try {
+                                $joinResult = $slack->joinChannel($accessToken, $channelId);
+                                if ($joinResult['success']) {
+                                    Log::info('Bot joined channel', [
+                                        'channel_id' => $channelId,
+                                        'channel_name' => $channel['name'] ?? 'unknown',
+                                    ]);
+                                    
+                                    // Track this channel as joined
+                                    $joinedChannels[] = $channelId;
+                                }
+                                break; // Success, exit retry loop
+                            } catch (\Exception $e) {
+                                $attempt++;
+                                if (strpos($e->getMessage(), 'ratelimited') !== false) {
+                                    $waitTime = pow(2, $attempt) * 5; // Exponential backoff: 10s, 20s, 40s
+                                    Log::warning('Rate limited on join, waiting before retry', [
+                                        'channel' => $channel['name'] ?? 'unknown',
+                                        'attempt' => $attempt,
+                                        'wait_seconds' => $waitTime,
+                                    ]);
+                                    sleep($waitTime);
+                                } else {
+                                    // Already in channel or other non-critical error, track as joined
+                                    if (strpos($e->getMessage(), 'already_in_channel') !== false) {
+                                        $joinedChannels[] = $channelId;
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                        
+                        // Rate limiting: wait 10 seconds between joins (very conservative)
+                        sleep(10);
+                    } elseif (!$isPrivate && in_array($channelId, $joinedChannels)) {
+                        Log::debug('Skipping join, already member', [
+                            'channel_id' => $channelId,
+                            'channel_name' => $channel['name'] ?? 'unknown',
+                        ]);
+                    }
+                    
+                    // Process channel messages (skip if rate limited, will retry on next sync)
+                    try {
+                        $messagesIngested = $this->ingestSlackChannel($slack, $accessToken, $channel, $job, $docs, $chunks, $errors);
+                        $docs += $messagesIngested;
+                    } catch (\Exception $e) {
+                        if (strpos($e->getMessage(), 'ratelimited') !== false) {
+                            Log::warning('Rate limited on channel, skipping for now (will retry on next sync)', [
+                                'channel' => $channel['name'] ?? 'unknown',
+                                'note' => 'This channel will be processed on the next sync',
+                            ]);
+                            // Don't increment errors, this is expected
+                            // Continue to next channel
+                        } else {
+                            Log::error('Channel processing failed', [
+                                'channel' => $channel['name'] ?? 'unknown',
+                                'error' => $e->getMessage(),
+                            ]);
+                            $errors++;
+                        }
+                    }
+                    
+                    // Rate limiting: wait 15 seconds between channel processing (very conservative)
+                    sleep(15);
                 }
             } while ($cursor);
+            
+            // Save updated list of joined channels
+            $metadata = $connector->metadata ?? [];
+            $metadata['joined_channels'] = array_unique($joinedChannels);
+            
+            $connector->metadata = $metadata;
+            $connector->save();
+            
+            Log::info('Slack sync completed successfully', [
+                'total_channels_joined' => count($metadata['joined_channels']),
+                'total_channels_processed' => $totalProcessed,
+                'total_batches' => $batchNumber,
+            ]);
 
         } catch (\Exception $e) {
             // Handle rate limiting
@@ -1130,6 +1232,11 @@ class IngestConnectorJob implements ShouldQueue
                     }
 
                     $allMessages[] = $message;
+                }
+                
+                // Rate limiting: wait between paginated message fetches (conversations.history is Tier 2)
+                if ($cursor) {
+                    sleep(5);
                 }
 
             } while ($cursor);
@@ -1278,7 +1385,7 @@ class IngestConnectorJob implements ShouldQueue
                         $userInfo = $slack->getUserInfo($accessToken, $userId);
                         $userName = $userInfo['real_name'] ?? $userInfo['name'] ?? $userId;
                         $userCache[$userId] = $userName;
-                        sleep(0.5); // Rate limit: 0.5s between user lookups
+                        sleep(1); // Rate limit: 1s between user lookups (Slack Tier 3: 50+/min)
                     } catch (\Exception $e) {
                         $userCache[$userId] = $userId; // Fallback to ID
                     }
@@ -1289,10 +1396,22 @@ class IngestConnectorJob implements ShouldQueue
             if (!empty($message['files'])) {
                 foreach ($message['files'] as $file) {
                     $sharedByName = $userCache[$userId] ?? $userId;
+                    
+                    // Debug: Log all available URL fields
+                    Log::debug("Slack file URLs available", [
+                        'file_name' => $file['name'] ?? 'Unknown',
+                        'file_id' => $file['id'] ?? '',
+                        'url_private' => isset($file['url_private']) ? 'yes' : 'no',
+                        'url_private_download' => isset($file['url_private_download']) ? 'yes' : 'no',
+                        'permalink' => isset($file['permalink']) ? 'yes' : 'no',
+                        'permalink_public' => isset($file['permalink_public']) ? 'yes' : 'no',
+                    ]);
+                    
                     $allFiles[] = [
+                        'id' => $file['id'] ?? '', // File ID for API download
                         'name' => $file['name'] ?? 'Unknown',
                         'type' => $file['mimetype'] ?? 'unknown',
-                        'url' => $file['url_private'] ?? '',
+                        'url' => $file['url_private_download'] ?? $file['url_private'] ?? '', // Prefer download URL
                         'shared_by' => $userId,
                         'shared_by_name' => $sharedByName,
                     ];
@@ -1483,6 +1602,7 @@ class IngestConnectorJob implements ShouldQueue
         
         foreach ($files as $fileInfo) {
             try {
+                $fileId = $fileInfo['id'] ?? '';
                 $fileName = $fileInfo['name'];
                 $fileUrl = $fileInfo['url'];
                 $mimeType = $fileInfo['type'];
@@ -1507,35 +1627,121 @@ class IngestConnectorJob implements ShouldQueue
                 
                 Log::info("Downloading Slack file", [
                     'file' => $fileName,
+                    'file_id' => $fileId,
                     'type' => $mimeType,
                 ]);
                 
-                // Download file from Slack (requires access token)
+                // Get fresh tokens
                 $tokens = json_decode(decrypt($connector->encrypted_tokens), true);
-                $accessToken = $tokens['access_token'] ?? null;
+                // Use user_token for file operations (xoxp-), fallback to bot token if not available
+                $fileAccessToken = $tokens['user_token'] ?? $tokens['access_token'] ?? null;
                 
-                $response = \Illuminate\Support\Facades\Http::withHeaders([
-                        'Authorization' => 'Bearer ' . $accessToken,
-                    ])
-                    ->timeout(120)
-                    ->get($fileUrl);
+                Log::info("Using token for file download", [
+                    'has_user_token' => !empty($tokens['user_token']),
+                    'has_bot_token' => !empty($tokens['access_token']),
+                    'using_user_token' => !empty($tokens['user_token']),
+                ]);
                 
-                if (!$response->successful()) {
-                    Log::error("Failed to download Slack file", [
+                // Step 1: Call files.info API to get fresh download URL
+                Log::info("Getting fresh file info from Slack API", [
+                    'file_id' => $fileId,
+                ]);
+                
+                $infoResponse = \Illuminate\Support\Facades\Http::withToken($fileAccessToken)
+                    ->get('https://slack.com/api/files.info', [
+                        'file' => $fileId,
+                    ]);
+                
+                if (!$infoResponse->successful() || !($infoResponse->json()['ok'] ?? false)) {
+                    Log::error("Failed to get Slack file info", [
                         'file' => $fileName,
-                        'status' => $response->status(),
-                        'url' => $fileUrl,
+                        'file_id' => $fileId,
+                        'error' => $infoResponse->json()['error'] ?? 'unknown',
                     ]);
                     $errors++;
                     continue;
                 }
                 
-                $fileContent = $response->body();
+                $fileInfo = $infoResponse->json()['file'] ?? null;
+                $downloadUrl = $fileInfo['url_private_download'] ?? null;
                 
-                Log::info("Slack file downloaded", [
+                if (!$downloadUrl) {
+                    Log::error("No download URL in Slack file info", [
+                        'file' => $fileName,
+                        'file_id' => $fileId,
+                    ]);
+                    $errors++;
+                    continue;
+                }
+                
+                // Step 2: Download with proper headers (binary mode)
+                Log::info("Downloading file with authenticated request", [
+                    'file' => $fileName,
+                ]);
+                
+                $response = \Illuminate\Support\Facades\Http::withHeaders([
+                        'Authorization' => 'Bearer ' . $fileAccessToken,
+                        'Accept' => 'application/octet-stream',
+                    ])
+                    ->timeout(120)
+                    ->get($downloadUrl);
+                
+                $fileContent = $response->body();
+                $contentType = $response->header('Content-Type');
+                
+                // Check if we got HTML instead of binary (auth failed)
+                if (!$response->successful() || str_starts_with($fileContent, '<') || str_contains($contentType ?? '', 'html')) {
+                    Log::warning("Authenticated download failed, trying public URL fallback", [
+                        'file' => $fileName,
+                        'status' => $response->status(),
+                        'content_type' => $contentType,
+                    ]);
+                    
+                    // Step 3: Fallback - Make file public temporarily
+                    $publicResponse = \Illuminate\Support\Facades\Http::withToken($fileAccessToken)
+                        ->post('https://slack.com/api/files.sharedPublicURL', [
+                            'file' => $fileId,
+                        ]);
+                    
+                    if ($publicResponse->json()['ok'] ?? false) {
+                        // Get updated file info with public URL
+                        $infoResponse = \Illuminate\Support\Facades\Http::withToken($fileAccessToken)
+                            ->get('https://slack.com/api/files.info', [
+                                'file' => $fileId,
+                            ]);
+                        
+                        $publicUrl = $infoResponse->json()['file']['permalink_public'] ?? null;
+                        
+                        if ($publicUrl) {
+                            Log::info("Downloading via public URL", [
+                                'file' => $fileName,
+                            ]);
+                            
+                            $response = \Illuminate\Support\Facades\Http::timeout(120)
+                                ->get($publicUrl);
+                            
+                            $fileContent = $response->body();
+                            $contentType = $response->header('Content-Type');
+                        }
+                    }
+                    
+                    // Final check
+                    if (!$response->successful() || str_starts_with($fileContent, '<') || str_contains($contentType ?? '', 'html')) {
+                        Log::error("All Slack download methods failed", [
+                            'file' => $fileName,
+                            'file_id' => $fileId,
+                            'final_status' => $response->status(),
+                            'note' => 'File may be deleted, restricted, or token lacks permissions',
+                        ]);
+                        $errors++;
+                        continue;
+                    }
+                }
+                
+                Log::info("Slack file downloaded successfully", [
                     'file' => $fileName,
                     'size_bytes' => strlen($fileContent),
-                    'is_empty' => empty($fileContent),
+                    'content_type' => $contentType,
                 ]);
                 
                 // Check if file content is empty
@@ -1663,8 +1869,8 @@ class IngestConnectorJob implements ShouldQueue
                 
                 $docs++;
                 
-                // Rate limiting: wait between file downloads
-                sleep(2);
+                // Rate limiting: wait between file downloads to avoid overwhelming Slack API
+                sleep(3);
                 
             } catch (\Exception $e) {
                 Log::error("Failed to process Slack file", [

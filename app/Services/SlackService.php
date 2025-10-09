@@ -70,7 +70,8 @@ class SlackService
             }
             
             return [
-                'access_token' => $data['access_token'],
+                'access_token' => $data['access_token'], // Bot token (xoxb-)
+                'user_token' => $data['authed_user']['access_token'] ?? null, // User token (xoxp-) - needed for files!
                 'team_id' => $data['team']['id'],
                 'team_name' => $data['team']['name'],
                 'user_id' => $data['authed_user']['id'] ?? null,

@@ -523,7 +523,8 @@ class ConnectorController extends Controller
 
             // Store tokens in encrypted_tokens column (like Google Drive and Dropbox)
             $connector->encrypted_tokens = encrypt(json_encode([
-                'access_token' => $tokenData['access_token'],
+                'access_token' => $tokenData['access_token'], // Bot token (xoxb-)
+                'user_token' => $tokenData['user_token'] ?? null, // User token (xoxp-) - for files!
                 'team_id' => $tokenData['team_id'],
                 'team_name' => $tokenData['team_name'],
             ]));
