@@ -1298,40 +1298,30 @@ class IngestConnectorJob implements ShouldQueue
             ];
         }
         
-        // Group standalone messages by time window (1 hour)
+        // Group standalone messages by DAY (better conversation continuity)
+        // All messages in a channel on the same day form one document
         usort($standalone, function($a, $b) {
             return floatval($a['ts']) - floatval($b['ts']);
         });
         
-        $currentGroup = [];
-        $lastTimestamp = null;
-        $timeWindow = 3600; // 1 hour in seconds
+        $dayGroups = [];
         
         foreach ($standalone as $message) {
             $timestamp = floatval($message['ts']);
+            $dateKey = date('Y-m-d', (int)$timestamp); // Group by day
             
-            if ($lastTimestamp === null || ($timestamp - $lastTimestamp) <= $timeWindow) {
-                // Add to current group
-                $currentGroup[] = $message;
-                $lastTimestamp = $timestamp;
-            } else {
-                // Start new group
-                if (!empty($currentGroup)) {
-                    $conversations[] = [
-                        'type' => 'time_window',
-                        'messages' => $currentGroup,
-                    ];
-                }
-                $currentGroup = [$message];
-                $lastTimestamp = $timestamp;
+            if (!isset($dayGroups[$dateKey])) {
+                $dayGroups[$dateKey] = [];
             }
+            $dayGroups[$dateKey][] = $message;
         }
         
-        // Add remaining group
-        if (!empty($currentGroup)) {
+        // Each day's messages become one conversation
+        foreach ($dayGroups as $date => $dayMessages) {
             $conversations[] = [
-                'type' => 'time_window',
-                'messages' => $currentGroup,
+                'type' => 'daily_conversation',
+                'date' => $date,
+                'messages' => $dayMessages,
             ];
         }
         
@@ -1427,6 +1417,28 @@ class IngestConnectorJob implements ShouldQueue
             
             // Build message text with attribution (use real name!)
             $text = $message['text'] ?? '';
+            
+            // Resolve user mentions in text: <@U09KT6PVC92> → @eleazar N
+            if (preg_match_all('/<@([A-Z0-9]+)>/', $text, $matches)) {
+                foreach ($matches[1] as $mentionedUserId) {
+                    // Resolve mentioned user ID to name
+                    if (!isset($userCache[$mentionedUserId])) {
+                        try {
+                            $mentionedUserInfo = $slack->getUserInfo($accessToken, $mentionedUserId);
+                            $mentionedUserName = $mentionedUserInfo['real_name'] ?? $mentionedUserInfo['name'] ?? $mentionedUserId;
+                            $userCache[$mentionedUserId] = $mentionedUserName;
+                            sleep(1); // Rate limit
+                        } catch (\Exception $e) {
+                            $userCache[$mentionedUserId] = $mentionedUserId;
+                        }
+                    }
+                    
+                    // Replace <@USERID> with @Real Name
+                    $mentionedName = $userCache[$mentionedUserId] ?? $mentionedUserId;
+                    $text = str_replace("<@{$mentionedUserId}>", "@{$mentionedName}", $text);
+                }
+            }
+            
             $timestamp = date('H:i', (int)floatval($message['ts']));
             $userName = $userCache[$userId] ?? $userId;
             $messageTexts[] = "[{$timestamp}] @{$userName}: {$text}";
@@ -1457,13 +1469,19 @@ class IngestConnectorJob implements ShouldQueue
         if ($isThread) {
             $title = "Thread in #{$channelName} ({$messageCount} replies)";
         } else {
-            $title = "Conversation in #{$channelName} (" . date('M d, Y', (int)floatval($firstMessage['ts'])) . ")";
+            $date = date('M d, Y', (int)floatval($firstMessage['ts']));
+            $title = "Conversation in #{$channelName} ({$date}) - {$messageCount} messages";
         }
         
         // Generate unique external ID
-        $externalId = $isThread 
-            ? $conversation['thread_ts']
-            : 'timewindow_' . (int)floatval($firstMessage['ts']);
+        // For threads: use thread_ts
+        // For daily conversations: use channel_id + date (so messages on same day merge)
+        if ($isThread) {
+            $externalId = $conversation['thread_ts'];
+        } else {
+            $date = $conversation['date'] ?? date('Y-m-d', (int)floatval($firstMessage['ts']));
+            $externalId = $channelId . '_' . $date; // e.g., "C09L2H711FT_2025-10-09"
+        }
         
         // Permalink to first message
         $permalink = "https://slack.com/archives/{$channelId}/p" . str_replace('.', '', $firstMessage['ts']);
