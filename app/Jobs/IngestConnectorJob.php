@@ -1539,6 +1539,11 @@ class IngestConnectorJob implements ShouldQueue
                     'content' => $content,
                     'is_thread' => $isThread,
                     'thread_ts' => $isThread ? $conversation['thread_ts'] : null,
+                    // Make transcript accessible for AI
+                    'download_url' => $cloudinaryUrl,
+                    'transcript_url' => $cloudinaryUrl,
+                    'is_conversation' => true,
+                    'source_platform' => 'slack',
                 ]),
                 'fetched_at' => now(),
             ]
@@ -1834,6 +1839,12 @@ class IngestConnectorJob implements ShouldQueue
                         'channel_name' => $channelName,
                         'shared_by' => $sharedBy,
                         'conversation_document_id' => $conversationDocId,
+                        // Make download URL easily accessible for AI
+                        'download_url' => $fileCloudinaryUrl,
+                        'file_preview_url' => $fileCloudinaryUrl,
+                        'original_slack_url' => $fileUrl,
+                        'file_extension' => pathinfo($fileName, PATHINFO_EXTENSION),
+                        'is_downloadable' => true,
                     ]),
                     'fetched_at' => now(),
                 ]);

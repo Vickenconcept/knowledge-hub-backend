@@ -91,6 +91,9 @@ class SlackService
     public function getTeamInfo(string $accessToken): array
     {
         $response = Http::withToken($accessToken)
+            ->timeout(60)
+            ->connectTimeout(30)
+            ->retry(3, 5000)
             ->get('https://slack.com/api/team.info');
         
         $data = $response->json();
@@ -118,6 +121,9 @@ class SlackService
         }
         
         $response = Http::withToken($accessToken)
+            ->timeout(60)
+            ->connectTimeout(30)
+            ->retry(3, 5000)
             ->get('https://slack.com/api/conversations.list', $params);
         
         $data = $response->json();
@@ -152,6 +158,9 @@ class SlackService
         if ($cursor) $params['cursor'] = $cursor;
         
         $response = Http::withToken($accessToken)
+            ->timeout(60) // 60 second timeout for slow connections
+            ->connectTimeout(30) // 30 second SSL handshake timeout
+            ->retry(3, 5000) // Retry 3 times with 5 second delay on failure
             ->get('https://slack.com/api/conversations.history', $params);
         
         $data = $response->json();
@@ -176,6 +185,9 @@ class SlackService
         string $threadTs
     ): array {
         $response = Http::withToken($accessToken)
+            ->timeout(60)
+            ->connectTimeout(30)
+            ->retry(3, 5000)
             ->get('https://slack.com/api/conversations.replies', [
                 'channel' => $channelId,
                 'ts' => $threadTs,
@@ -202,6 +214,9 @@ class SlackService
         }
         
         $response = Http::withToken($accessToken)
+            ->timeout(60)
+            ->connectTimeout(30)
+            ->retry(3, 5000)
             ->get('https://slack.com/api/users.list', $params);
         
         $data = $response->json();
@@ -222,6 +237,9 @@ class SlackService
     public function getUserInfo(string $accessToken, string $userId): array
     {
         $response = Http::withToken($accessToken)
+            ->timeout(60)
+            ->connectTimeout(30)
+            ->retry(3, 5000)
             ->get('https://slack.com/api/users.info', [
                 'user' => $userId,
             ]);
@@ -242,6 +260,9 @@ class SlackService
     {
         try {
             $response = Http::withToken($accessToken)
+                ->timeout(60)
+                ->connectTimeout(30)
+                ->retry(3, 5000)
                 ->get('https://slack.com/api/auth.test');
             
             $data = $response->json();
@@ -258,6 +279,9 @@ class SlackService
     {
         try {
             $response = Http::withToken($accessToken)
+                ->timeout(60)
+                ->connectTimeout(30)
+                ->retry(3, 5000)
                 ->asForm()
                 ->post('https://slack.com/api/conversations.join', [
                     'channel' => $channelId,
