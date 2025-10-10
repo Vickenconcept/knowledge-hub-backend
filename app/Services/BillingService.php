@@ -56,11 +56,11 @@ class BillingService
         // Calculate usage metrics
         $metrics = [
             'total_chat_queries' => $costs->where('operation_type', 'chat')->count(),
-            'total_embeddings' => $costs->where('operation_type', 'embedding')->count(),
+            'total_documents_indexed' => $costs->where('operation_type', 'document_ingestion')->count(), // ✅ Documents created
+            'total_embeddings' => $costs->where('operation_type', 'embedding')->count(), // ✅ Chunks embedded
             'total_vector_queries' => $costs->where('operation_type', 'vector_query')->count(),
             'total_vector_upserts' => $costs->where('operation_type', 'vector_upsert')->count(),
             'total_file_pulls' => $costs->where('operation_type', 'file_pull')->count(),
-            'monthly_document_ingestion' => $costs->where('operation_type', 'document_ingestion')->count(),
             'current_documents_stored' => DB::table('documents')->where('org_id', $orgId)->count(),
             'total_operations' => $costs->count(),
         ];

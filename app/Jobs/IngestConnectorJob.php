@@ -490,6 +490,14 @@ class IngestConnectorJob implements ShouldQueue
                     'fetched_at' => now(),
                 ]);
                         
+                        // ✅ Track document ingestion for quota management
+                        \App\Services\CostTrackingService::trackDocumentIngestion(
+                            $this->orgId,
+                            $document->id,
+                            $this->connectorId,
+                            $job->id
+                        );
+                        
                         Log::info("✅ Document created in DB", [
                             'doc_id' => $document->id,
                             'saved_source_url' => $document->source_url,
@@ -927,6 +935,14 @@ class IngestConnectorJob implements ShouldQueue
                             's3_path' => $cloudinaryUrl, // Store Cloudinary URL
                             'fetched_at' => now(),
                         ]);
+                        
+                        // ✅ Track document ingestion for quota management
+                        \App\Services\CostTrackingService::trackDocumentIngestion(
+                            $this->orgId,
+                            $document->id,
+                            $this->connectorId,
+                            $job->id
+                        );
                         
                         Log::info("✅ Document created in DB", [
                             'doc_id' => $document->id,
@@ -1778,6 +1794,14 @@ class IngestConnectorJob implements ShouldQueue
                 ]),
                 'fetched_at' => now(),
             ]);
+            
+            // ✅ Track document ingestion for quota management
+            \App\Services\CostTrackingService::trackDocumentIngestion(
+                $this->orgId,
+                $document->id,
+                $this->connectorId,
+                $job->id
+            );
         }
 
         Log::info('Conversation indexed', [
@@ -2161,6 +2185,14 @@ class IngestConnectorJob implements ShouldQueue
                         ]),
                         'fetched_at' => now(),
                     ]);
+                    
+                    // ✅ Track document ingestion for quota management
+                    \App\Services\CostTrackingService::trackDocumentIngestion(
+                        $this->orgId,
+                        $fileDocument->id,
+                        $this->connectorId,
+                        $job->id
+                    );
                     
                     Log::info("Slack file document created", [
                         'document_id' => $fileDocument->id,
