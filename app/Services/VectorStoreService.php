@@ -68,7 +68,7 @@ class VectorStoreService
         return $resp->json();
     }
 
-    public function query(array $embedding, int $topK = 6, ?string $namespace = null, ?string $orgId = null, ?string $conversationId = null): array
+    public function query(array $embedding, int $topK = 6, ?string $namespace = null, ?string $orgId = null, ?string $conversationId = null, ?array $filter = null): array
     {
         if (empty($this->baseUrl) || empty($this->apiKey) || empty($this->index)) {
             return [];
@@ -90,6 +90,12 @@ class VectorStoreService
         ];
         if (!empty($namespace)) {
             $payload['namespace'] = $namespace;
+        }
+        
+        // Add metadata filter for source filtering
+        if (!empty($filter)) {
+            $payload['filter'] = $filter;
+            Log::info('Applying Pinecone metadata filter', ['filter' => $filter]);
         }
         $resp = Http::withHeaders(['Api-Key' => $this->apiKey, 'Content-Type' => 'application/json'])
             ->timeout(60) // 60 second timeout

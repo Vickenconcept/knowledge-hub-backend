@@ -60,6 +60,8 @@ class BillingService
             'total_vector_queries' => $costs->where('operation_type', 'vector_query')->count(),
             'total_vector_upserts' => $costs->where('operation_type', 'vector_upsert')->count(),
             'total_file_pulls' => $costs->where('operation_type', 'file_pull')->count(),
+            'monthly_document_ingestion' => $costs->where('operation_type', 'document_ingestion')->count(),
+            'current_documents_stored' => DB::table('documents')->where('org_id', $orgId)->count(),
             'total_operations' => $costs->count(),
         ];
         
@@ -121,12 +123,18 @@ class BillingService
             $warnings[] = "Chat queries at 80%: {$metrics['total_chat_queries']} / {$tier->max_chat_queries_per_month}";
         }
         
-        // Check documents (count from database)
-        $documentCount = DB::table('documents')->where('org_id', $orgId)->count();
-        if ($tier->max_documents && $documentCount > $tier->max_documents) {
-            $exceeded[] = "Documents: {$documentCount} / {$tier->max_documents}";
-        } elseif ($tier->max_documents && $documentCount > ($tier->max_documents * 0.8)) {
-            $warnings[] = "Documents at 80%: {$documentCount} / {$tier->max_documents}";
+        // Check documents (monthly ingestion from cost_tracking to prevent gaming)
+        $currentDocumentCount = DB::table('documents')->where('org_id', $orgId)->count();
+        $monthlyDocIngestion = DB::table('cost_tracking')
+            ->where('org_id', $orgId)
+            ->where('operation_type', 'document_ingestion')
+            ->where('created_at', '>=', date('Y-m-01')) // This month
+            ->count();
+        
+        if ($tier->max_documents && $monthlyDocIngestion > $tier->max_documents) {
+            $exceeded[] = "Documents indexed this month: {$monthlyDocIngestion} / {$tier->max_documents} (Currently stored: {$currentDocumentCount})";
+        } elseif ($tier->max_documents && $monthlyDocIngestion > ($tier->max_documents * 0.8)) {
+            $warnings[] = "Documents at 80%: {$monthlyDocIngestion} / {$tier->max_documents}";
         }
         
         // Check users

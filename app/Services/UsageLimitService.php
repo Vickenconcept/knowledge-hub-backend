@@ -51,6 +51,9 @@ class UsageLimitService
     
     /**
      * Check if organization can upload/index documents
+     * 
+     * NOTE: This tracks MONTHLY ingestion via cost_tracking to prevent quota gaming
+     * (where users sync, delete, sync again to bypass limits)
      */
     public static function canAddDocument(string $orgId): array
     {
@@ -60,18 +63,31 @@ class UsageLimitService
             return ['allowed' => true];
         }
         
-        // Count total documents
-        $documentCount = DB::table('documents')
+        // Count CURRENT documents (for display)
+        $currentDocumentCount = DB::table('documents')
             ->where('org_id', $orgId)
             ->count();
         
+        // Count MONTHLY document ingestion (to prevent gaming)
+        // Strategy: Use documents.created_at as source of truth
+        // This counts all documents created this month, even if later deleted
+        $monthlyIngestion = DB::table('documents')
+            ->where('org_id', $orgId)
+            ->where('created_at', '>=', now()->startOfMonth())
+            ->count();
+        
+        // NOTE: We also track in cost_tracking for historical audit,
+        // but documents.created_at is the primary source for quota checks
+        
         $maxDocuments = $limits['max_documents'];
         
-        if ($maxDocuments && $documentCount >= $maxDocuments) {
+        // Check against MONTHLY ingestion, not current count
+        if ($maxDocuments && $monthlyIngestion >= $maxDocuments) {
             return [
                 'allowed' => false,
-                'reason' => "You've reached your plan limit of {$maxDocuments} documents. Please upgrade your plan or delete some documents.",
-                'current_usage' => $documentCount,
+                'reason' => "You've reached your plan limit of {$maxDocuments} documents indexed this month. Deleting and re-syncing doesn't reset your quota. Please upgrade your plan or wait until next month.",
+                'current_usage' => $monthlyIngestion,
+                'current_active' => $currentDocumentCount,
                 'limit' => $maxDocuments,
                 'tier' => $limits['tier_name'],
             ];
@@ -79,9 +95,10 @@ class UsageLimitService
         
         return [
             'allowed' => true,
-            'current_usage' => $documentCount,
+            'current_usage' => $monthlyIngestion,
+            'current_active' => $currentDocumentCount,
             'limit' => $maxDocuments,
-            'remaining' => $maxDocuments ? ($maxDocuments - $documentCount) : null,
+            'remaining' => $maxDocuments ? ($maxDocuments - $monthlyIngestion) : null,
         ];
     }
     

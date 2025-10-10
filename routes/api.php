@@ -87,6 +87,9 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('response-styles', [ChatController::class, 'getResponseStyles']);
     Route::patch('user/preferences', [ChatController::class, 'updateUserPreferences']);
 
+    // Usage & Limits
+    Route::get('usage/status', [ConnectorController::class, 'getUsageStatus']);
+    
     // Connectors
     Route::get('orgs/{org}/connectors', [ConnectorController::class, 'index']);
     Route::post('orgs/{org}/connectors', [ConnectorController::class, 'create']);

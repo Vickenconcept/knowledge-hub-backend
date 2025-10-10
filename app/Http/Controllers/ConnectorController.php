@@ -11,6 +11,18 @@ use Google\Client as GoogleClient;
 
 class ConnectorController extends Controller
 {
+    /**
+     * Get usage status and limits for organization
+     */
+    public function getUsageStatus(Request $request)
+    {
+        $orgId = $request->user()->org_id;
+        
+        $status = \App\Services\UsageLimitService::getUsageStatus($orgId);
+        
+        return response()->json($status);
+    }
+    
     public function index(Request $request)
     {
         $orgId = $request->user()->org_id;
@@ -259,27 +271,34 @@ class ConnectorController extends Controller
         $documentsCount = $connector->documents()->count();
         $chunksCount = $connector->chunks()->count();
         
-        // Get document IDs for Pinecone deletion
+        // Get document IDs and chunk IDs for Pinecone deletion
         $documentIds = $connector->documents()->pluck('id')->toArray();
         
-        // Delete from Pinecone (optional - you can keep vectors if you want)
-        if (!empty($documentIds)) {
+        // Get all chunk IDs to delete from Pinecone
+        $chunkIds = \App\Models\Chunk::whereIn('document_id', $documentIds)
+            ->pluck('id')
+            ->toArray();
+        
+        // Delete from Pinecone FIRST (before deleting from database)
+        if (!empty($chunkIds)) {
             try {
                 $vectorStore = new \App\Services\VectorStoreService();
-                // Delete vectors by metadata filter
-                // Note: Pinecone doesn't support bulk delete by metadata in free tier
-                // You may need to delete namespace or handle differently in production
-                \Log::info('Vectors in Pinecone will remain (manual cleanup needed)', [
-                    'document_ids' => $documentIds,
+                $vectorStore->delete($chunkIds);
+                
+                \Log::info('Deleted vectors from Pinecone', [
+                    'chunk_count' => count($chunkIds),
+                    'connector_id' => $connector->id,
                 ]);
             } catch (\Exception $e) {
                 \Log::warning('Could not delete vectors from Pinecone', [
                     'error' => $e->getMessage(),
+                    'chunk_count' => count($chunkIds),
                 ]);
+                // Continue with deletion even if Pinecone fails
             }
         }
         
-        // Delete chunks
+        // Delete chunks from database
         \App\Models\Chunk::whereIn('document_id', $documentIds)->delete();
         
         // Delete documents

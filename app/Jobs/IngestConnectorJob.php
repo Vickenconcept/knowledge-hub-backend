@@ -614,6 +614,7 @@ class IngestConnectorJob implements ShouldQueue
                             'chunk_id' => $chunk->id,
                             'document_id' => $chunk->document_id,
                             'org_id' => $chunk->org_id,
+                            'connector_id' => $this->connectorId, // ✅ ADD THIS for source filtering!
                         ]
                     ];
                 }
