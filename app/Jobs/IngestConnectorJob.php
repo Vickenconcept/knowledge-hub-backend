@@ -1522,32 +1522,167 @@ class IngestConnectorJob implements ShouldQueue
         }
         
         // ========================================
-        // SAME AS GOOGLE DRIVE: Create Document
+        // Check if conversation document already exists
         // ========================================
-        $document = \App\Models\Document::updateOrCreate(
-            [
+        $existingDoc = \App\Models\Document::where('org_id', $this->orgId)
+            ->where('connector_id', $this->connectorId)
+            ->where('external_id', $externalId)
+            ->first();
+        
+        // If exists, we need to MERGE content, not replace
+        if ($existingDoc) {
+            // Get existing content first
+            $existingContent = $existingDoc->metadata['content'] ?? '';
+            $newMessagesText = implode("\n", $messageTexts);
+            
+            Log::info('Updating existing conversation with new messages', [
+                'external_id' => $externalId,
+                'existing_messages' => $existingDoc->metadata['message_count'] ?? 0,
+                'new_messages' => $messageCount,
+                'existing_content_length' => strlen($existingContent),
+                'new_messages_length' => strlen($newMessagesText),
+                'will_merge' => true,
+            ]);
+            
+            // Merge participants
+            $existingParticipants = $existingDoc->metadata['participants'] ?? [];
+            $mergedParticipants = array_unique(array_merge($existingParticipants, array_keys($participants)));
+            
+            // Merge files (deduplicate by file ID)
+            $existingFiles = $existingDoc->metadata['files'] ?? [];
+            $existingFileIds = array_column($existingFiles, 'id');
+            
+            // Only add new files that don't already exist
+            foreach ($allFiles as $file) {
+                if (!in_array($file['id'] ?? '', $existingFileIds)) {
+                    $existingFiles[] = $file;
+                }
+            }
+            $mergedFiles = $existingFiles;
+            
+            // Merge user mapping
+            $existingUserCache = $existingDoc->metadata['user_mapping'] ?? [];
+            $mergedUserCache = array_merge($existingUserCache, $userCache);
+            
+            // Append ONLY new message texts to existing content (don't rebuild header!)
+            
+            // Check if existing content has the old "Files Shared" section
+            $existingWithoutFiles = $existingContent;
+            if (preg_match('/\n\n={50}\n\[Files Shared/', $existingContent, $matches, PREG_OFFSET_CAPTURE)) {
+                // Remove old files section
+                $existingWithoutFiles = substr($existingContent, 0, $matches[0][1]);
+            }
+            
+            // Append new messages
+            $mergedContent = $existingWithoutFiles . "\n" . $newMessagesText;
+            
+            // Re-add files section if there are any
+            if (!empty($mergedFiles)) {
+                $mergedContent .= "\n\n" . str_repeat("=", 50) . "\n";
+                $mergedContent .= "[Files Shared in This Conversation]\n";
+                foreach ($mergedFiles as $file) {
+                    $sharedByName = $file['shared_by_name'] ?? $file['shared_by'];
+                    $mergedContent .= "- {$file['name']} ({$file['type']}) shared by @{$sharedByName}\n";
+                }
+            }
+            
+            // Re-upload merged transcript to Cloudinary
+            try {
+                $uploader = new \App\Services\FileUploadService();
+                $tmpPath = sys_get_temp_dir() . '/' . uniqid('slack_') . '.txt';
+                file_put_contents($tmpPath, $mergedContent);
+                
+                $upload = $uploader->uploadRawPath($tmpPath, 'knowledgehub/slack');
+                $cloudinaryUrl = $upload['secure_url'] ?? $cloudinaryUrl;
+                
+                @unlink($tmpPath);
+                
+                Log::info("Updated conversation uploaded to Cloudinary", [
+                    'url' => $cloudinaryUrl,
+                ]);
+            } catch (\Exception $e) {
+                Log::warning("Could not re-upload updated conversation", [
+                    'error' => $e->getMessage(),
+                ]);
+            }
+            
+            // Calculate total message count
+            $totalMessageCount = ($existingDoc->metadata['message_count'] ?? 0) + $messageCount;
+            
+            // Update title with total message count
+            if ($isThread) {
+                $updatedTitle = "Thread in #{$channelName} ({$totalMessageCount} replies)";
+            } else {
+                $date = date('M d, Y', (int)floatval($firstMessage['ts']));
+                $updatedTitle = "Conversation in #{$channelName} ({$date}) - {$totalMessageCount} messages";
+            }
+            
+            // Update existing document
+            $existingDoc->update([
+                'title' => $updatedTitle,
+                'size' => strlen($mergedContent),
+                's3_path' => $cloudinaryUrl,
+                'sha256' => hash('sha256', $mergedContent),
+                'metadata' => array_merge($classification['metadata'], [
+                    'channel_id' => $channelId,
+                    'channel_name' => $channelName,
+                    'conversation_type' => $conversation['type'],
+                    'message_count' => $totalMessageCount,
+                    'participants' => $mergedParticipants,
+                    'participant_count' => count($mergedParticipants),
+                    'participant_names' => array_values($mergedUserCache),
+                    'user_mapping' => $mergedUserCache,
+                    'files' => $mergedFiles,
+                    'file_count' => count($mergedFiles),
+                    'reactions' => array_unique(array_merge($existingDoc->metadata['reactions'] ?? [], $allReactions)),
+                    'first_message_at' => $existingDoc->metadata['first_message_at'],
+                    'last_message_at' => floatval($lastMessage['ts']),
+                    'permalink' => $permalink,
+                    'content' => $mergedContent,
+                    'is_thread' => $isThread,
+                    'thread_ts' => $isThread ? $conversation['thread_ts'] : null,
+                    'download_url' => $cloudinaryUrl,
+                    'transcript_url' => $cloudinaryUrl,
+                    'is_conversation' => true,
+                    'source_platform' => 'slack',
+                ]),
+                'fetched_at' => now(),
+            ]);
+            
+            Log::info('Document updated with merged content', [
+                'document_id' => $existingDoc->id,
+                'old_message_count' => $existingDoc->metadata['message_count'] ?? 0,
+                'new_messages_added' => $messageCount,
+                'total_messages' => $totalMessageCount,
+                'merged_content_length' => strlen($mergedContent),
+                'cloudinary_url' => $cloudinaryUrl,
+            ]);
+            
+            $document = $existingDoc;
+            
+        } else {
+            // Create new document
+            $document = \App\Models\Document::create([
                 'org_id' => $this->orgId,
                 'connector_id' => $this->connectorId,
                 'external_id' => $externalId,
-            ],
-            [
                 'title' => $title,
                 'source_url' => $permalink,
                 'mime_type' => 'text/plain',
-                'doc_type' => $classification['doc_type'], // AI-classified type
+                'doc_type' => $classification['doc_type'],
                 'size' => strlen($content),
-                'tags' => $classification['tags'], // AI-generated tags
-                's3_path' => $cloudinaryUrl, // Cloudinary URL (like Google Drive!)
+                'tags' => $classification['tags'],
+                's3_path' => $cloudinaryUrl,
                 'sha256' => hash('sha256', $content),
-                'metadata' => array_merge($classification['metadata'], [ // Merge AI metadata
+                'metadata' => array_merge($classification['metadata'], [
                     'channel_id' => $channelId,
                     'channel_name' => $channelName,
                     'conversation_type' => $conversation['type'],
                     'message_count' => $messageCount,
                     'participants' => array_keys($participants),
                     'participant_count' => count($participants),
-                    'participant_names' => array_values($userCache), // Real names!
-                    'user_mapping' => $userCache, // ID → Name mapping
+                    'participant_names' => array_values($userCache),
+                    'user_mapping' => $userCache,
                     'files' => $allFiles,
                     'file_count' => count($allFiles),
                     'reactions' => array_unique($allReactions),
@@ -1557,26 +1692,38 @@ class IngestConnectorJob implements ShouldQueue
                     'content' => $content,
                     'is_thread' => $isThread,
                     'thread_ts' => $isThread ? $conversation['thread_ts'] : null,
-                    // Make transcript accessible for AI
                     'download_url' => $cloudinaryUrl,
                     'transcript_url' => $cloudinaryUrl,
                     'is_conversation' => true,
                     'source_platform' => 'slack',
                 ]),
                 'fetched_at' => now(),
-            ]
-        );
+            ]);
+        }
 
         Log::info('Conversation indexed', [
             'document_id' => $document->id,
             'type' => $conversation['type'],
-            'messages' => $messageCount,
-            'participants' => count($participants),
-            'files' => count($allFiles),
+            'messages' => $document->metadata['message_count'] ?? $messageCount,
+            'participants' => count($document->metadata['participants'] ?? []),
+            'files' => count($document->metadata['files'] ?? []),
+            'is_update' => !empty($existingDoc),
         ]);
 
+        // If updating existing document, delete old chunks first
+        if ($existingDoc) {
+            $deletedChunks = \App\Models\Chunk::where('document_id', $document->id)->delete();
+            Log::info('Deleted old chunks for re-indexing', [
+                'document_id' => $document->id,
+                'deleted_chunks' => $deletedChunks,
+            ]);
+        }
+
         // Generate embeddings (using same pattern as Google Drive/Dropbox)
-        $conversationContent = $content;
+        // Use merged content if updating, original content if new
+        $conversationContent = $existingDoc 
+            ? ($document->metadata['content'] ?? $content)
+            : $content;
         
         // Create chunks from conversation content
         $chunkObjects = [];
@@ -1597,6 +1744,7 @@ class IngestConnectorJob implements ShouldQueue
         Log::info('Chunks created for conversation', [
             'document_id' => $document->id,
             'chunk_count' => count($chunkObjects),
+            'total_content_length' => strlen($conversationContent),
         ]);
         
         // Use the same embedding method as Google Drive/Dropbox
