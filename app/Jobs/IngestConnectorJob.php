@@ -1364,6 +1364,17 @@ class IngestConnectorJob implements ShouldQueue
             
             // Ingest each conversation as a document
             foreach ($conversations as $conversation) {
+                // ✅ CHECK QUOTA BEFORE PROCESSING EACH CONVERSATION
+                $quotaCheck = \App\Services\UsageLimitService::canAddDocument($this->orgId);
+                if (!$quotaCheck['allowed']) {
+                    Log::warning('🛑 Document quota reached, skipping remaining Slack conversations', [
+                        'quota_used' => $quotaCheck['current_usage'],
+                        'quota_limit' => $quotaCheck['limit'],
+                        'channel' => $channel['name'],
+                    ]);
+                    break; // Stop processing more conversations
+                }
+                
                 $this->ingestSlackConversation($channel, $conversation, $job, $chunks);
             }
             
