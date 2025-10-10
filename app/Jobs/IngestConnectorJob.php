@@ -1855,10 +1855,19 @@ class IngestConnectorJob implements ShouldQueue
                     continue;
                 }
                 
+                // ========================================
+                // Check for existing document (same as Google Drive/Dropbox)
+                // ========================================
+                $existingFileDoc = \App\Models\Document::where('org_id', $this->orgId)
+                    ->where('connector_id', $this->connectorId)
+                    ->where('external_id', 'slack_file_' . $fileId)
+                    ->first();
+                
                 Log::info("Downloading Slack file", [
                     'file' => $fileName,
                     'file_id' => $fileId,
                     'type' => $mimeType,
+                    'existing_document' => $existingFileDoc ? 'yes' : 'no',
                 ]);
                 
                 // Get fresh tokens
@@ -1984,6 +1993,33 @@ class IngestConnectorJob implements ShouldQueue
                     continue;
                 }
                 
+                // ========================================
+                // CHECK IF FILE CHANGED (same as Google Drive/Dropbox)
+                // ========================================
+                $contentHash = hash('sha256', $fileContent);
+                
+                if ($existingFileDoc) {
+                    // Compare SHA256 hash - if same, skip re-processing
+                    if ($existingFileDoc->sha256 === $contentHash) {
+                        Log::info("⏭️ Slack file unchanged (by hash), skipping", [
+                            'file' => $fileName,
+                            'document_id' => $existingFileDoc->id,
+                            'last_fetched' => $existingFileDoc->fetched_at,
+                        ]);
+                        continue; // Skip this file completely
+                    }
+                    
+                    Log::info("🔄 Slack file changed, updating", [
+                        'file' => $fileName,
+                        'document_id' => $existingFileDoc->id,
+                        'old_hash' => substr($existingFileDoc->sha256, 0, 8),
+                        'new_hash' => substr($contentHash, 0, 8),
+                    ]);
+                    
+                    // Delete old chunks (will re-create with new content)
+                    \App\Models\Chunk::where('document_id', $existingFileDoc->id)->delete();
+                }
+                
                 // Track file pull
                 \App\Services\CostTrackingService::trackFilePull(
                     $this->orgId,
@@ -1994,7 +2030,7 @@ class IngestConnectorJob implements ShouldQueue
                 );
                 
                 // ========================================
-                // UPLOAD ORIGINAL FILE TO CLOUDINARY FIRST
+                // UPLOAD ORIGINAL FILE TO CLOUDINARY
                 // (Do this BEFORE text extraction, so we keep the file even if extraction fails)
                 // ========================================
                 $tmpPath = sys_get_temp_dir() . '/' . uniqid('slack_file_') . '_' . basename($fileName);
@@ -2046,38 +2082,71 @@ class IngestConnectorJob implements ShouldQueue
                 // Clean up temp file
                 @unlink($tmpPath);
                 
-                // Create document for the file
-                $fileDocument = \App\Models\Document::create([
-                    'org_id' => $this->orgId,
-                    'connector_id' => $this->connectorId,
-                    'external_id' => 'slack_file_' . basename($fileUrl),
-                    'title' => $fileName,
-                    'source_url' => $fileUrl,
-                    'mime_type' => $mimeType,
-                    'doc_type' => $fileClassification['doc_type'],
-                    'size' => strlen($text),
-                    'tags' => $fileClassification['tags'],
-                    's3_path' => $fileCloudinaryUrl,
-                    'sha256' => hash('sha256', $fileContent),
-                    'metadata' => array_merge($fileClassification['metadata'], [
-                        'shared_in_slack' => true,
-                        'channel_name' => $channelName,
-                        'shared_by' => $sharedBy,
-                        'conversation_document_id' => $conversationDocId,
-                        // Make download URL easily accessible for AI
-                        'download_url' => $fileCloudinaryUrl,
-                        'file_preview_url' => $fileCloudinaryUrl,
-                        'original_slack_url' => $fileUrl,
-                        'file_extension' => pathinfo($fileName, PATHINFO_EXTENSION),
-                        'is_downloadable' => true,
-                    ]),
-                    'fetched_at' => now(),
-                ]);
-                
-                Log::info("Slack file document created", [
-                    'document_id' => $fileDocument->id,
-                    'file' => $fileName,
-                ]);
+                // Create or update document for the file (same as Google Drive/Dropbox)
+                if ($existingFileDoc) {
+                    // Update existing document
+                    $existingFileDoc->update([
+                        'title' => $fileName,
+                        'source_url' => $fileUrl,
+                        'mime_type' => $mimeType,
+                        'doc_type' => $fileClassification['doc_type'],
+                        'size' => strlen($text),
+                        'tags' => $fileClassification['tags'],
+                        's3_path' => $fileCloudinaryUrl,
+                        'sha256' => $contentHash,
+                        'metadata' => array_merge($fileClassification['metadata'], [
+                            'shared_in_slack' => true,
+                            'channel_name' => $channelName,
+                            'shared_by' => $sharedBy,
+                            'conversation_document_id' => $conversationDocId,
+                            'download_url' => $fileCloudinaryUrl,
+                            'file_preview_url' => $fileCloudinaryUrl,
+                            'original_slack_url' => $fileUrl,
+                            'file_extension' => pathinfo($fileName, PATHINFO_EXTENSION),
+                            'is_downloadable' => true,
+                        ]),
+                        'fetched_at' => now(),
+                    ]);
+                    
+                    $fileDocument = $existingFileDoc;
+                    
+                    Log::info("Slack file document updated", [
+                        'document_id' => $fileDocument->id,
+                        'file' => $fileName,
+                    ]);
+                } else {
+                    // Create new document
+                    $fileDocument = \App\Models\Document::create([
+                        'org_id' => $this->orgId,
+                        'connector_id' => $this->connectorId,
+                        'external_id' => 'slack_file_' . $fileId,
+                        'title' => $fileName,
+                        'source_url' => $fileUrl,
+                        'mime_type' => $mimeType,
+                        'doc_type' => $fileClassification['doc_type'],
+                        'size' => strlen($text),
+                        'tags' => $fileClassification['tags'],
+                        's3_path' => $fileCloudinaryUrl,
+                        'sha256' => $contentHash,
+                        'metadata' => array_merge($fileClassification['metadata'], [
+                            'shared_in_slack' => true,
+                            'channel_name' => $channelName,
+                            'shared_by' => $sharedBy,
+                            'conversation_document_id' => $conversationDocId,
+                            'download_url' => $fileCloudinaryUrl,
+                            'file_preview_url' => $fileCloudinaryUrl,
+                            'original_slack_url' => $fileUrl,
+                            'file_extension' => pathinfo($fileName, PATHINFO_EXTENSION),
+                            'is_downloadable' => true,
+                        ]),
+                        'fetched_at' => now(),
+                    ]);
+                    
+                    Log::info("Slack file document created", [
+                        'document_id' => $fileDocument->id,
+                        'file' => $fileName,
+                    ]);
+                }
                 
                 // Chunk and embed the file (SAME AS GOOGLE DRIVE!)
                 $textChunks = $extractor->chunkText($text);
