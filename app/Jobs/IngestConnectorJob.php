@@ -1590,13 +1590,14 @@ class IngestConnectorJob implements ShouldQueue
         
         // If exists, we need to MERGE content, not replace
         if ($existingDoc) {
-            // Get existing content first
+            // Get existing content and count BEFORE any updates
             $existingContent = $existingDoc->metadata['content'] ?? '';
+            $existingMessageCount = $existingDoc->metadata['message_count'] ?? 0;
             $newMessagesText = implode("\n", $messageTexts);
             
             Log::info('Updating existing conversation with new messages', [
                 'external_id' => $externalId,
-                'existing_messages' => $existingDoc->metadata['message_count'] ?? 0,
+                'existing_messages' => $existingMessageCount,
                 'new_messages' => $messageCount,
                 'existing_content_length' => strlen($existingContent),
                 'new_messages_length' => strlen($newMessagesText),
@@ -1665,8 +1666,8 @@ class IngestConnectorJob implements ShouldQueue
                 ]);
             }
             
-            // Calculate total message count
-            $totalMessageCount = ($existingDoc->metadata['message_count'] ?? 0) + $messageCount;
+            // Calculate total message count (use stored count from before update)
+            $totalMessageCount = $existingMessageCount + $messageCount;
             
             // Update title with total message count
             if ($isThread) {
@@ -1710,7 +1711,7 @@ class IngestConnectorJob implements ShouldQueue
             
             Log::info('Document updated with merged content', [
                 'document_id' => $existingDoc->id,
-                'old_message_count' => $existingDoc->metadata['message_count'] ?? 0,
+                'old_message_count' => $existingMessageCount, // Use stored count, not re-read
                 'new_messages_added' => $messageCount,
                 'total_messages' => $totalMessageCount,
                 'merged_content_length' => strlen($mergedContent),
