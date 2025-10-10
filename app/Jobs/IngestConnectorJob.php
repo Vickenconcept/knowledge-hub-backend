@@ -1357,30 +1357,17 @@ class IngestConnectorJob implements ShouldQueue
             ];
         }
         
-        // Group standalone messages by DAY (better conversation continuity)
-        // All messages in a channel on the same day form one document
+        // Group standalone messages into ONE conversation per channel (keeps growing)
+        // Only create new document when limit is reached
         usort($standalone, function($a, $b) {
             return floatval($a['ts']) - floatval($b['ts']);
         });
         
-        $dayGroups = [];
-        
-        foreach ($standalone as $message) {
-            $timestamp = floatval($message['ts']);
-            $dateKey = date('Y-m-d', (int)$timestamp); // Group by day
-            
-            if (!isset($dayGroups[$dateKey])) {
-                $dayGroups[$dateKey] = [];
-            }
-            $dayGroups[$dateKey][] = $message;
-        }
-        
-        // Each day's messages become one conversation
-        foreach ($dayGroups as $date => $dayMessages) {
+        // All standalone messages go into one conversation
+        if (!empty($standalone)) {
             $conversations[] = [
-                'type' => 'daily_conversation',
-                'date' => $date,
-                'messages' => $dayMessages,
+                'type' => 'channel_conversation',
+                'messages' => $standalone,
             ];
         }
         
@@ -1525,21 +1512,16 @@ class IngestConnectorJob implements ShouldQueue
         $isThread = $conversation['type'] === 'thread';
         $messageCount = count($messages);
         
-        if ($isThread) {
-            $title = "Thread in #{$channelName} ({$messageCount} replies)";
-        } else {
-            $date = date('M d, Y', (int)floatval($firstMessage['ts']));
-            $title = "Conversation in #{$channelName} ({$date}) - {$messageCount} messages";
-        }
-        
         // Generate unique external ID
         // For threads: use thread_ts
-        // For daily conversations: use channel_id + date (so messages on same day merge)
+        // For channel conversations: use channel_id only (single growing document per channel)
         if ($isThread) {
             $externalId = $conversation['thread_ts'];
+            $title = "Thread in #{$channelName} ({$messageCount} replies)";
         } else {
-            $date = $conversation['date'] ?? date('Y-m-d', (int)floatval($firstMessage['ts']));
-            $externalId = $channelId . '_' . $date; // e.g., "C09L2H711FT_2025-10-09"
+            $externalId = 'channel_' . $channelId; // e.g., "channel_C09L2H711FT"
+            // Temporary title, will be updated after checking for existing doc
+            $title = "Conversation in #{$channelName} ({$messageCount} messages)";
         }
         
         // Permalink to first message
@@ -1588,8 +1570,37 @@ class IngestConnectorJob implements ShouldQueue
             ->where('external_id', $externalId)
             ->first();
         
-        // If exists, we need to MERGE content, not replace
-        if ($existingDoc) {
+        // Check if existing document has reached limits (for channels only, not threads)
+        $shouldCreateNew = false;
+        if ($existingDoc && !$isThread) {
+            $existingMessageCount = $existingDoc->metadata['message_count'] ?? 0;
+            $existingSize = strlen($existingDoc->metadata['content'] ?? '');
+            $existingAge = now()->diffInDays($existingDoc->created_at);
+            
+            // Create new document if limits reached
+            if ($existingMessageCount >= 100 || $existingSize >= 50000 || $existingAge >= 30) {
+                $shouldCreateNew = true;
+                
+                Log::info('Conversation document reached limit, creating new document', [
+                    'external_id' => $externalId,
+                    'reason' => $existingMessageCount >= 100 ? 'messages' : ($existingSize >= 50000 ? 'size' : 'age'),
+                    'existing_messages' => $existingMessageCount,
+                    'existing_size' => $existingSize,
+                    'existing_age_days' => $existingAge,
+                ]);
+                
+                // Archive old document by updating its external_id
+                $existingDoc->update([
+                    'external_id' => $externalId . '_archived_' . now()->timestamp,
+                ]);
+                
+                // Will create fresh document below
+                $existingDoc = null;
+            }
+        }
+        
+        // If exists and not over limit, MERGE content
+        if ($existingDoc && !$shouldCreateNew) {
             // Get existing content and count BEFORE any updates
             $existingContent = $existingDoc->metadata['content'] ?? '';
             $existingMessageCount = $existingDoc->metadata['message_count'] ?? 0;
@@ -1673,8 +1684,8 @@ class IngestConnectorJob implements ShouldQueue
             if ($isThread) {
                 $updatedTitle = "Thread in #{$channelName} ({$totalMessageCount} replies)";
             } else {
-                $date = date('M d, Y', (int)floatval($firstMessage['ts']));
-                $updatedTitle = "Conversation in #{$channelName} ({$date}) - {$totalMessageCount} messages";
+                // Single document per channel, show total messages
+                $updatedTitle = "Conversation in #{$channelName} ({$totalMessageCount} messages)";
             }
             
             // Update existing document
@@ -1721,12 +1732,19 @@ class IngestConnectorJob implements ShouldQueue
             $document = $existingDoc;
             
         } else {
-            // Create new document
+            // Create new document (first time for this channel or thread)
+            // Set title based on type
+            if ($isThread) {
+                $newTitle = "Thread in #{$channelName} ({$messageCount} replies)";
+            } else {
+                $newTitle = "Conversation in #{$channelName} ({$messageCount} messages)";
+            }
+            
             $document = \App\Models\Document::create([
                 'org_id' => $this->orgId,
                 'connector_id' => $this->connectorId,
                 'external_id' => $externalId,
-                'title' => $title,
+                'title' => $newTitle,
                 'source_url' => $permalink,
                 'mime_type' => 'text/plain',
                 'doc_type' => $classification['doc_type'],
