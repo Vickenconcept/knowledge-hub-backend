@@ -99,6 +99,16 @@ class ConnectorController extends Controller
             ]);
         }
 
+        // Calculate progress percentage based on connector type
+        $progressPercentage = 0;
+        if (isset($job->stats['total_channels']) && $job->stats['total_channels'] > 0) {
+            // Slack: use channels
+            $progressPercentage = round(($job->stats['processed_channels'] / $job->stats['total_channels']) * 100, 1);
+        } elseif (isset($job->stats['total_files']) && $job->stats['total_files'] > 0) {
+            // Google Drive, Dropbox: use files
+            $progressPercentage = round(($job->stats['processed_files'] / $job->stats['total_files']) * 100, 1);
+        }
+        
         return response()->json([
             'has_job' => true,
             'job_id' => $job->id,
@@ -106,9 +116,7 @@ class ConnectorController extends Controller
             'stats' => $job->stats,
             'created_at' => $job->created_at,
             'finished_at' => $job->finished_at,
-            'progress_percentage' => isset($job->stats['total_files']) && $job->stats['total_files'] > 0
-                ? round(($job->stats['processed_files'] / $job->stats['total_files']) * 100, 1)
-                : 0,
+            'progress_percentage' => $progressPercentage,
         ]);
     }
 

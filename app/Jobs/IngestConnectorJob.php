@@ -1026,7 +1026,7 @@ class IngestConnectorJob implements ShouldQueue
                 throw new \Exception('Slack authentication failed - token may be expired');
             }
 
-            // Fetch all channels
+            // Fetch all channels and count total (for progress tracking)
             $cursor = null;
             $channelCount = 0;
             $maxChannelsPerBatch = 10; // Process 10 channels per batch, then take a 10s break
@@ -1036,7 +1036,33 @@ class IngestConnectorJob implements ShouldQueue
             
             $totalProcessed = 0;
             $batchNumber = 1;
+            $allChannels = [];
             
+            // First, fetch all channels to count total
+            $tempCursor = null;
+            do {
+                $result = $slack->listChannels($accessToken, $tempCursor);
+                $allChannels = array_merge($allChannels, $result['channels']);
+                $tempCursor = $result['next_cursor'];
+                sleep(2); // Rate limit between list calls
+            } while ($tempCursor);
+            
+            $totalChannels = count(array_filter($allChannels, fn($ch) => !($ch['is_archived'] ?? false)));
+            
+            // Update job with total channels
+            $job->stats = array_merge($job->stats ?? [], [
+                'total_channels' => $totalChannels,
+                'processed_channels' => 0,
+                'current_channel' => 'Starting...',
+            ]);
+            $job->save();
+            
+            Log::info('Total Slack channels to process', [
+                'total_channels' => $totalChannels,
+            ]);
+            
+            // Now process channels
+            $cursor = null;
             do {
                 $result = $slack->listChannels($accessToken, $cursor);
                 $channels = $result['channels'];
@@ -1073,6 +1099,17 @@ class IngestConnectorJob implements ShouldQueue
                     
                     $channelCount++;
                     $totalProcessed++;
+                    
+                    // Update job stats with current channel being processed
+                    $job->stats = array_merge($job->stats ?? [], [
+                        'total_channels' => $totalChannels,
+                        'processed_channels' => $totalProcessed - 1, // -1 because we're about to process this one
+                        'current_channel' => $channel['name'] ?? 'unknown',
+                        'docs' => $docs,
+                        'chunks' => $chunks,
+                        'errors' => $errors,
+                    ]);
+                    $job->save();
                     
                     // Try to auto-join public channels (skip if already joined)
                     $isPrivate = $channel['is_private'] ?? false;
@@ -1144,6 +1181,17 @@ class IngestConnectorJob implements ShouldQueue
                         }
                     }
                     
+                    // Update job stats after processing channel
+                    $job->stats = array_merge($job->stats ?? [], [
+                        'total_channels' => $totalChannels,
+                        'processed_channels' => $totalProcessed,
+                        'current_channel' => $channel['name'] ?? 'unknown',
+                        'docs' => $docs,
+                        'chunks' => $chunks,
+                        'errors' => $errors,
+                    ]);
+                    $job->save();
+                    
                     // Rate limiting: wait 15 seconds between channel processing (very conservative)
                     sleep(15);
                 }
@@ -1155,6 +1203,17 @@ class IngestConnectorJob implements ShouldQueue
             
             $connector->metadata = $metadata;
             $connector->save();
+            
+            // Update final stats
+            $job->stats = array_merge($job->stats ?? [], [
+                'total_channels' => $totalChannels,
+                'processed_channels' => $totalProcessed,
+                'current_channel' => 'Completed',
+                'docs' => $docs,
+                'chunks' => $chunks,
+                'errors' => $errors,
+            ]);
+            $job->save();
             
             Log::info('Slack sync completed successfully', [
                 'total_channels_joined' => count($metadata['joined_channels']),
