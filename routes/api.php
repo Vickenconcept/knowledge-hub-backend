@@ -112,6 +112,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('documents/{id}/chunks', [DocumentController::class, 'chunks']);
     Route::post('documents/{id}/reindex', [DocumentController::class, 'reindex']);
     Route::delete('documents/{id}', [DocumentController::class, 'destroy']);
+    Route::post('documents/bulk-delete', [DocumentController::class, 'bulkDestroy']);
     Route::post('documents/upload', [DocumentController::class, 'upload']);
 
     // Admin
