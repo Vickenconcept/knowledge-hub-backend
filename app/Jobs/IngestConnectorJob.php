@@ -258,6 +258,27 @@ class IngestConnectorJob implements ShouldQueue
                     ]);
                     return; // Exit gracefully (void return is fine here)
                 }
+                
+                // ✅ CHECK QUOTA BEFORE PROCESSING EACH FILE
+                $quotaCheck = \App\Services\UsageLimitService::canAddDocument($this->orgId);
+                if (!$quotaCheck['allowed']) {
+                    Log::warning('🛑 Document quota reached mid-sync, stopping file processing', [
+                        'job_id' => $job->id,
+                        'quota_used' => $quotaCheck['current_usage'],
+                        'quota_limit' => $quotaCheck['limit'],
+                        'processed_files' => $processedFiles,
+                        'remaining_files' => count($files) - $index,
+                    ]);
+                    
+                    // Update job with warning
+                    $job->stats = array_merge($job->stats, [
+                        'quota_reached' => true,
+                        'quota_message' => 'Document quota reached. Processed ' . $processedFiles . ' of ' . count($files) . ' files.',
+                    ]);
+                    $job->save();
+                    
+                    break; // Stop processing more files
+                }
 
                 try {
                     Log::info("Processing file #{$index}", [
@@ -727,6 +748,27 @@ class IngestConnectorJob implements ShouldQueue
                         'total_files' => count($files)
                     ]);
                     return $largeFiles; // Exit gracefully, return large files array
+                }
+                
+                // ✅ CHECK QUOTA BEFORE PROCESSING EACH FILE
+                $quotaCheck = \App\Services\UsageLimitService::canAddDocument($this->orgId);
+                if (!$quotaCheck['allowed']) {
+                    Log::warning('🛑 Document quota reached mid-sync (Dropbox), stopping file processing', [
+                        'job_id' => $job->id,
+                        'quota_used' => $quotaCheck['current_usage'],
+                        'quota_limit' => $quotaCheck['limit'],
+                        'processed_files' => $processedFiles,
+                        'remaining_files' => count($files) - $index,
+                    ]);
+                    
+                    // Update job with warning
+                    $job->stats = array_merge($job->stats, [
+                        'quota_reached' => true,
+                        'quota_message' => 'Document quota reached. Processed ' . $processedFiles . ' of ' . count($files) . ' files.',
+                    ]);
+                    $job->save();
+                    
+                    break; // Stop processing more files
                 }
 
                 try {
@@ -1875,6 +1917,17 @@ class IngestConnectorJob implements ShouldQueue
         $classifier = new \App\Services\DocumentClassificationService();
         
         foreach ($files as $fileInfo) {
+            // ✅ CHECK QUOTA BEFORE PROCESSING EACH SLACK FILE
+            $quotaCheck = \App\Services\UsageLimitService::canAddDocument($this->orgId);
+            if (!$quotaCheck['allowed']) {
+                Log::warning('🛑 Document quota reached, skipping remaining Slack files', [
+                    'quota_used' => $quotaCheck['current_usage'],
+                    'quota_limit' => $quotaCheck['limit'],
+                    'skipped_files' => count($files) - $slackFileDocsProcessed,
+                ]);
+                break; // Stop processing more files
+            }
+            
             try {
                 $fileId = $fileInfo['id'] ?? '';
                 $fileName = $fileInfo['name'];
