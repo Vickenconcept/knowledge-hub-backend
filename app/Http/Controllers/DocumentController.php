@@ -10,6 +10,7 @@ use App\Services\DocumentExtractionService;
 use App\Jobs\CreateChunksJob;
 use App\Jobs\ReindexDocumentJob;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
 
 class DocumentController extends Controller
 {
@@ -88,22 +89,108 @@ class DocumentController extends Controller
     public function destroy(Request $request, string $id, VectorStoreService $vector)
     {
         $orgId = $request->user()->org_id;
-        if (($request->user()->role ?? 'user') !== 'admin') {
-            return response()->json(['error' => 'Forbidden'], 403);
-        }
         $doc = Document::where('org_id', $orgId)->where('id', $id)->first();
+        
         if (!$doc) {
             return response()->json(['error' => 'Document not found'], 404);
         }
+        
+        Log::info('Deleting document', [
+            'document_id' => $doc->id,
+            'title' => $doc->title,
+            'user_id' => $request->user()->id,
+        ]);
+        
+        // Get all chunk IDs for vector deletion
         $chunkIds = Chunk::where('document_id', $doc->id)->pluck('id')->all();
 
+        // Delete from vector store (Pinecone)
         if (!empty($chunkIds)) {
-            try { $vector->delete($chunkIds); } catch (\Throwable $e) { /* ignore */ }
+            try { 
+                $vector->delete($chunkIds); 
+                Log::info('Deleted vectors from Pinecone', [
+                    'chunk_count' => count($chunkIds),
+                ]);
+            } catch (\Throwable $e) { 
+                Log::warning('Failed to delete vectors from Pinecone', [
+                    'error' => $e->getMessage(),
+                ]);
+            }
         }
 
+        // Delete chunks from database
         Chunk::where('document_id', $doc->id)->delete();
+        
+        // Delete document
         $doc->delete();
-        return response()->json(['status' => 'deleted']);
+        
+        Log::info('Document deleted successfully', [
+            'document_id' => $id,
+        ]);
+        
+        return response()->json([
+            'message' => 'Document deleted successfully',
+            'deleted_chunks' => count($chunkIds),
+        ]);
+    }
+    
+    public function bulkDestroy(Request $request, VectorStoreService $vector)
+    {
+        $request->validate([
+            'document_ids' => 'required|array|min:1',
+            'document_ids.*' => 'required|string',
+        ]);
+        
+        $orgId = $request->user()->org_id;
+        $documentIds = $request->input('document_ids');
+        
+        Log::info('Bulk deleting documents', [
+            'count' => count($documentIds),
+            'user_id' => $request->user()->id,
+        ]);
+        
+        $deletedCount = 0;
+        $totalChunksDeleted = 0;
+        
+        foreach ($documentIds as $documentId) {
+            $doc = Document::where('org_id', $orgId)->where('id', $documentId)->first();
+            
+            if (!$doc) {
+                continue; // Skip if not found or not owned by org
+            }
+            
+            // Get all chunk IDs for vector deletion
+            $chunkIds = Chunk::where('document_id', $doc->id)->pluck('id')->all();
+
+            // Delete from vector store
+            if (!empty($chunkIds)) {
+                try { 
+                    $vector->delete($chunkIds); 
+                    $totalChunksDeleted += count($chunkIds);
+                } catch (\Throwable $e) { 
+                    Log::warning('Failed to delete vectors for document', [
+                        'document_id' => $doc->id,
+                        'error' => $e->getMessage(),
+                    ]);
+                }
+            }
+
+            // Delete chunks and document
+            Chunk::where('document_id', $doc->id)->delete();
+            $doc->delete();
+            $deletedCount++;
+        }
+        
+        Log::info('Bulk delete completed', [
+            'deleted_documents' => $deletedCount,
+            'deleted_chunks' => $totalChunksDeleted,
+        ]);
+        
+        return response()->json([
+            'message' => "{$deletedCount} document(s) deleted successfully",
+            'deleted_count' => $deletedCount,
+            'deleted_chunks' => $totalChunksDeleted,
+        ]);
     }
 
     public function upload(Request $request, FileUploadService $uploader, DocumentExtractionService $extractor)
@@ -115,6 +202,20 @@ class DocumentController extends Controller
 
         $user = $request->user();
         $orgId = $user->org_id;
+        
+        // CHECK DOCUMENT LIMIT BEFORE UPLOAD
+        $docLimit = \App\Services\UsageLimitService::canAddDocument($orgId);
+        if (!$docLimit['allowed']) {
+            return response()->json([
+                'error' => 'Document limit exceeded',
+                'message' => $docLimit['reason'],
+                'limit_type' => 'max_documents',
+                'current_usage' => $docLimit['current_usage'],
+                'limit' => $docLimit['limit'],
+                'tier' => $docLimit['tier'],
+                'upgrade_required' => true,
+            ], 429);
+        }
 
         $file = $request->file('file');
         $mime = $file->getMimeType();

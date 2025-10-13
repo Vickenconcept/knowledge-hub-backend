@@ -20,15 +20,60 @@ class ChatController extends Controller
         $user = $request->user();
         $orgId = $user->org_id;
         
+        // CHECK USAGE LIMITS BEFORE PROCESSING
+        $chatLimit = \App\Services\UsageLimitService::canChat($orgId);
+        if (!$chatLimit['allowed']) {
+            return response()->json([
+                'error' => 'Usage limit exceeded',
+                'message' => $chatLimit['reason'],
+                'limit_type' => 'chat_queries',
+                'current_usage' => $chatLimit['current_usage'],
+                'limit' => $chatLimit['limit'],
+                'tier' => $chatLimit['tier'],
+                'upgrade_required' => true,
+            ], 429); // 429 = Too Many Requests
+        }
+        
+        // CHECK MONTHLY SPEND LIMIT
+        $spendLimit = \App\Services\UsageLimitService::isWithinSpendLimit($orgId);
+        if (!$spendLimit['within_limit']) {
+            return response()->json([
+                'error' => 'Monthly spend limit exceeded',
+                'message' => $spendLimit['reason'],
+                'limit_type' => 'monthly_spend',
+                'current_spend' => $spendLimit['current_spend'],
+                'limit' => $spendLimit['limit'],
+                'upgrade_required' => true,
+            ], 429);
+        }
+        
         $validated = $request->validate([
             'query' => 'required|string',
             'conversation_id' => 'nullable|string|uuid',
-            'top_k' => 'nullable|integer|min:1|max:50'
+            'top_k' => 'nullable|integer|min:1|max:50',
+            'connector_ids' => 'nullable|array', // Source filtering
+            'connector_ids.*' => 'string|uuid'
         ]);
 
         $queryText = $validated['query'];
         $topK = $validated['top_k'] ?? 15; // Increased from 6 to 15 for more comprehensive results
         $conversationId = $validated['conversation_id'] ?? null;
+        $requestedConnectorIds = $validated['connector_ids'] ?? null;
+        
+        // Detect natural language source mentions (e.g., "from dropbox", "in slack")
+        $detectedSource = $this->detectSourceInQuery($queryText, $orgId);
+        
+        // Use explicitly requested connectors, or fall back to detected ones
+        $connectorIds = $requestedConnectorIds ?? $detectedSource;
+        
+        if ($connectorIds) {
+            Log::info('Source filtering active', [
+                'requested' => $requestedConnectorIds,
+                'detected' => $detectedSource,
+                'final' => $connectorIds,
+                'query' => $queryText
+            ]);
+        }
 
         // Get or create conversation
         if ($conversationId) {
@@ -168,7 +213,16 @@ class ChatController extends Controller
             $snippets = [];
             if ($routing['search_documents']) {
             $embedding = $embeddingService->embed($queryText, $orgId);
-                $matches = $vectorStore->query($embedding, $topK, $orgId, $orgId, $conversation->id);
+                
+                // Build Pinecone metadata filter for connector filtering
+                $pineconeFilter = null;
+                if (!empty($connectorIds)) {
+                    $pineconeFilter = [
+                        'connector_id' => ['$in' => $connectorIds]
+                    ];
+                }
+                
+                $matches = $vectorStore->query($embedding, $topK, $orgId, $orgId, $conversation->id, $pineconeFilter);
             $chunkIds = array_map(fn($m) => $m['id'], $matches);
 
             if (empty($chunkIds)) {
@@ -623,5 +677,71 @@ class ChatController extends Controller
                 'ai_preferences' => $user->ai_preferences,
             ]
         ]);
+    }
+    
+    /**
+     * Detect source mentions in natural language
+     * Examples: "from dropbox", "in slack", "google drive only"
+     */
+    private function detectSourceInQuery(string $query, string $orgId): ?array
+    {
+        $query = strtolower($query);
+        
+        // Patterns to detect source mentions
+        $patterns = [
+            '/\b(?:from|in|on|search)\s+(dropbox|google\s*drive|slack|notion)\b/i',
+            '/\b(dropbox|google\s*drive|slack|notion)\s+(?:only|files?|documents?)\b/i',
+        ];
+        
+        $detectedSourceNames = [];
+        
+        foreach ($patterns as $pattern) {
+            if (preg_match_all($pattern, $query, $matches)) {
+                foreach ($matches[1] as $match) {
+                    $sourceName = strtolower(str_replace(' ', '_', trim($match)));
+                    $detectedSourceNames[] = $sourceName;
+                }
+            }
+        }
+        
+        if (empty($detectedSourceNames)) {
+            return null;
+        }
+        
+        // Map source names to connector types
+        $sourceTypeMap = [
+            'dropbox' => 'dropbox',
+            'google_drive' => 'google_drive',
+            'googledrive' => 'google_drive',
+            'slack' => 'slack',
+            'notion' => 'notion',
+        ];
+        
+        $connectorTypes = [];
+        foreach ($detectedSourceNames as $name) {
+            if (isset($sourceTypeMap[$name])) {
+                $connectorTypes[] = $sourceTypeMap[$name];
+            }
+        }
+        
+        if (empty($connectorTypes)) {
+            return null;
+        }
+        
+        // Get connector IDs for these types
+        $connectors = Connector::where('org_id', $orgId)
+            ->whereIn('type', $connectorTypes)
+            ->where('status', 'connected')
+            ->pluck('id')
+            ->toArray();
+        
+        Log::info('Detected source in natural language', [
+            'detected_names' => $detectedSourceNames,
+            'connector_types' => $connectorTypes,
+            'connector_ids' => $connectors,
+            'query' => $query
+        ]);
+        
+        return !empty($connectors) ? $connectors : null;
     }
 }

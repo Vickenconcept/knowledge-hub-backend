@@ -13,9 +13,14 @@ use App\Http\Controllers\CostTrackingController;
 use App\Http\Controllers\BillingController;
 use App\Http\Controllers\SubscriptionController;
 use App\Http\Controllers\PricingTierController;
+use App\Http\Controllers\TeamController;
+use App\Http\Controllers\StripeWebhookController;
 
 Route::post('auth/register', [AuthController::class, 'register']);
 Route::post('auth/login', [AuthController::class, 'login']);
+
+// Stripe Webhook (no auth required)
+Route::post('webhooks/stripe', [StripeWebhookController::class, 'handleWebhook']);
 
 
 
@@ -82,12 +87,16 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('response-styles', [ChatController::class, 'getResponseStyles']);
     Route::patch('user/preferences', [ChatController::class, 'updateUserPreferences']);
 
+    // Usage & Limits
+    Route::get('usage/status', [ConnectorController::class, 'getUsageStatus']);
+    
     // Connectors
     Route::get('orgs/{org}/connectors', [ConnectorController::class, 'index']);
     Route::post('orgs/{org}/connectors', [ConnectorController::class, 'create']);
     Route::post('connectors/{id}/oauth/callback', [ConnectorController::class, 'oauthCallback']);
     Route::post('connectors/{id}/start-ingest', [ConnectorController::class, 'startIngest']);
     Route::post('connectors/{id}/stop-sync', [ConnectorController::class, 'stopSync']);
+    Route::post('connectors/{id}/disconnect', [ConnectorController::class, 'disconnect']);
     Route::get('connectors/{connectorId}/job-status', [ConnectorController::class, 'getJobStatus']);
 
     // Google Drive OAuth
@@ -96,6 +105,9 @@ Route::middleware('auth:sanctum')->group(function () {
     // Dropbox Integration
     Route::get('connectors/dropbox/auth-url', [DropboxController::class, 'authUrl']);
     Route::post('connectors/dropbox/{id}/disconnect', [DropboxController::class, 'disconnect']);
+    
+    // Slack Integration
+    Route::get('connectors/slack/auth-url', [ConnectorController::class, 'getSlackAuthUrl']);
 
     // Documents
     Route::get('documents', [DocumentController::class, 'index']);
@@ -103,6 +115,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('documents/{id}/chunks', [DocumentController::class, 'chunks']);
     Route::post('documents/{id}/reindex', [DocumentController::class, 'reindex']);
     Route::delete('documents/{id}', [DocumentController::class, 'destroy']);
+    Route::post('documents/bulk-delete', [DocumentController::class, 'bulkDestroy']);
     Route::post('documents/upload', [DocumentController::class, 'upload']);
 
     // Admin
@@ -132,6 +145,10 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('subscription/upgrade-recommendation', [SubscriptionController::class, 'getUpgradeRecommendation']);
     Route::post('subscription/cancel', [SubscriptionController::class, 'cancelSubscription']);
     
+    // Stripe Payment
+    Route::post('payment/setup-intent', [SubscriptionController::class, 'createSetupIntent']);
+    Route::post('payment/process', [SubscriptionController::class, 'processPayment']);
+    
     // Admin: Pricing Tier Management
     Route::get('admin/pricing-tiers', [PricingTierController::class, 'index']);
     Route::get('admin/pricing-tiers/{id}', [PricingTierController::class, 'show']);
@@ -139,6 +156,12 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::put('admin/pricing-tiers/{id}', [PricingTierController::class, 'update']);
     Route::post('admin/pricing-tiers/{id}/toggle', [PricingTierController::class, 'toggleActive']);
     Route::delete('admin/pricing-tiers/{id}', [PricingTierController::class, 'destroy']);
+    
+    // Team Management
+    Route::get('team', [TeamController::class, 'index']);
+    Route::post('team/invite', [TeamController::class, 'invite']);
+    Route::put('team/{id}/role', [TeamController::class, 'updateRole']);
+    Route::delete('team/{id}', [TeamController::class, 'remove']);
     
     // DEBUG: Check running jobs
     Route::get('debug/running-jobs', function() {

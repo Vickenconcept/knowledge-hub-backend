@@ -334,5 +334,39 @@ class CostTrackingService
             'total_bytes' => $totalBytes,
         ]);
     }
+
+    /**
+     * Track document ingestion for quota management
+     * This is used to prevent quota gaming (delete/re-sync)
+     */
+    public static function trackDocumentIngestion(
+        string $orgId,
+        string $documentId,
+        ?string $connectorId = null,
+        ?string $ingestJobId = null
+    ): void {
+        // No direct cost, but we track for quota enforcement
+        // Each document ingestion counts toward monthly limit
+        $cost = 0;
+        
+        CostTracking::create([
+            'org_id' => $orgId,
+            'operation_type' => 'document_ingestion',
+            'model_used' => 'quota_tracking',
+            'provider' => 'system',
+            'tokens_input' => 1, // 1 document
+            'tokens_output' => 0,
+            'total_tokens' => 1,
+            'cost_usd' => $cost,
+            'document_id' => $documentId,
+            'ingest_job_id' => $ingestJobId,
+            'metadata' => json_encode(['connector_id' => $connectorId]),
+        ]);
+        
+        Log::debug('Tracked document ingestion for quota', [
+            'org_id' => $orgId,
+            'document_id' => $documentId,
+        ]);
+    }
 }
 

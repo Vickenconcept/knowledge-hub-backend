@@ -6,6 +6,7 @@ use App\Models\User;
 use App\Models\Organization;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Validation\ValidationException;
 use Illuminate\Support\Str;
@@ -53,6 +54,17 @@ class AuthController extends Controller
             'org_id' => $orgId,
             'role' => 'admin', // First user in organization is admin
         ]);
+        
+        // Set user as organization owner if this is a new org
+        if (empty($validated['org_id']) && isset($organization)) {
+            $organization->owner_id = $user->id;
+            $organization->save();
+            
+            Log::info('User set as organization owner', [
+                'user_id' => $user->id,
+                'org_id' => $orgId,
+            ]);
+        }
 
         $token = $user->createToken('api-token')->plainTextToken;
 

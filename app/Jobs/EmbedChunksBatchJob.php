@@ -21,7 +21,9 @@ class EmbedChunksBatchJob implements ShouldQueue
 
     public function handle(EmbeddingService $embeddingService, VectorStoreService $vectorStore): void
     {
-        $chunks = Chunk::whereIn('id', $this->chunkIds)->get();
+        $chunks = Chunk::whereIn('id', $this->chunkIds)
+            ->with('document:id,connector_id') // Load document to get connector_id
+            ->get();
         if ($chunks->isEmpty()) return;
 
         // Prepare batch inputs preserving order with aligned IDs/metadata
@@ -35,6 +37,7 @@ class EmbedChunksBatchJob implements ShouldQueue
                     'chunk_id' => (string) $chunk->id,
                     'document_id' => (string) $chunk->document_id,
                     'org_id' => (string) $this->orgId,
+                    'connector_id' => $chunk->document ? (string) $chunk->document->connector_id : null, // ✅ ADD THIS for source filtering!
                     'char_start' => $chunk->char_start,
                     'char_end' => $chunk->char_end,
                 ],
