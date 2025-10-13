@@ -15,6 +15,7 @@ use App\Http\Controllers\SubscriptionController;
 use App\Http\Controllers\PricingTierController;
 use App\Http\Controllers\TeamController;
 use App\Http\Controllers\StripeWebhookController;
+use App\Http\Controllers\FeedbackController;
 
 Route::post('auth/register', [AuthController::class, 'register']);
 Route::post('auth/login', [AuthController::class, 'login']);
@@ -162,6 +163,11 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('team/invite', [TeamController::class, 'invite']);
     Route::put('team/{id}/role', [TeamController::class, 'updateRole']);
     Route::delete('team/{id}', [TeamController::class, 'remove']);
+    
+    // Feedback System
+    Route::post('feedback', [FeedbackController::class, 'store']);
+    Route::get('feedback/{messageId}', [FeedbackController::class, 'show']);
+    Route::get('feedback/analytics', [FeedbackController::class, 'analytics']);
     
     // DEBUG: Check running jobs
     Route::get('debug/running-jobs', function() {
