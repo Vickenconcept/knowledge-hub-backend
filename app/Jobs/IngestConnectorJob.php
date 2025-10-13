@@ -1498,39 +1498,6 @@ class IngestConnectorJob implements ShouldQueue
                 }
             }
             
-            // Collect files
-            if (!empty($message['files'])) {
-                foreach ($message['files'] as $file) {
-                    $sharedByName = $userCache[$userId] ?? $userId;
-                    
-                    // Debug: Log all available URL fields
-                    Log::debug("Slack file URLs available", [
-                        'file_name' => $file['name'] ?? 'Unknown',
-                        'file_id' => $file['id'] ?? '',
-                        'url_private' => isset($file['url_private']) ? 'yes' : 'no',
-                        'url_private_download' => isset($file['url_private_download']) ? 'yes' : 'no',
-                        'permalink' => isset($file['permalink']) ? 'yes' : 'no',
-                        'permalink_public' => isset($file['permalink_public']) ? 'yes' : 'no',
-                    ]);
-                    
-                    $allFiles[] = [
-                        'id' => $file['id'] ?? '', // File ID for API download
-                        'name' => $file['name'] ?? 'Unknown',
-                        'type' => $file['mimetype'] ?? 'unknown',
-                        'url' => $file['url_private_download'] ?? $file['url_private'] ?? '', // Prefer download URL
-                        'shared_by' => $userId,
-                        'shared_by_name' => $sharedByName,
-                    ];
-                }
-            }
-            
-            // Collect reactions
-            if (!empty($message['reactions'])) {
-                foreach ($message['reactions'] as $reaction) {
-                    $allReactions[] = $reaction['name'] ?? '';
-                }
-            }
-            
             // Build message text with attribution (use real name!)
             $text = $message['text'] ?? '';
             
@@ -1558,6 +1525,45 @@ class IngestConnectorJob implements ShouldQueue
             $timestamp = date('H:i', (int)floatval($message['ts']));
             $userName = $userCache[$userId] ?? $userId;
             $messageTexts[] = "[{$timestamp}] @{$userName}: {$text}";
+            
+            // ✅ Add files INLINE right after the message (if any)
+            if (!empty($message['files'])) {
+                foreach ($message['files'] as $file) {
+                    $sharedByName = $userCache[$userId] ?? $userId;
+                    
+                    // Debug: Log all available URL fields
+                    Log::debug("Slack file URLs available", [
+                        'file_name' => $file['name'] ?? 'Unknown',
+                        'file_id' => $file['id'] ?? '',
+                        'url_private' => isset($file['url_private']) ? 'yes' : 'no',
+                        'url_private_download' => isset($file['url_private_download']) ? 'yes' : 'no',
+                        'permalink' => isset($file['permalink']) ? 'yes' : 'no',
+                        'permalink_public' => isset($file['permalink_public']) ? 'yes' : 'no',
+                    ]);
+                    
+                    // Add to allFiles for separate processing
+                    $allFiles[] = [
+                        'id' => $file['id'] ?? '', // File ID for API download
+                        'name' => $file['name'] ?? 'Unknown',
+                        'type' => $file['mimetype'] ?? 'unknown',
+                        'url' => $file['url_private_download'] ?? $file['url_private'] ?? '', // Prefer download URL
+                        'shared_by' => $userId,
+                        'shared_by_name' => $sharedByName,
+                    ];
+                    
+                    // ✅ Show file INLINE in conversation (right after message)
+                    $fileName = $file['name'] ?? 'Unknown';
+                    $fileType = $file['mimetype'] ?? 'unknown';
+                    $messageTexts[] = "    📎 Attached: {$fileName} ({$fileType})";
+                }
+            }
+            
+            // Collect reactions
+            if (!empty($message['reactions'])) {
+                foreach ($message['reactions'] as $reaction) {
+                    $allReactions[] = $reaction['name'] ?? '';
+                }
+            }
         }
         
         // Create conversation content
@@ -1568,15 +1574,7 @@ class IngestConnectorJob implements ShouldQueue
         $content .= str_repeat("=", 50) . "\n\n";
         $content .= implode("\n\n", $messageTexts);
         
-        // Add files section
-        if (!empty($allFiles)) {
-            $content .= "\n\n" . str_repeat("=", 50) . "\n";
-            $content .= "[Files Shared in This Conversation]\n";
-            foreach ($allFiles as $file) {
-                $sharedByName = $file['shared_by_name'] ?? $file['shared_by'];
-                $content .= "- {$file['name']} ({$file['type']}) shared by @{$sharedByName}\n";
-            }
-        }
+        // ✅ Files are now shown INLINE with messages (removed separate section)
         
         // Create title
         $isThread = $conversation['type'] === 'thread';
@@ -1707,25 +1705,16 @@ class IngestConnectorJob implements ShouldQueue
             
             // Append ONLY new message texts to existing content (don't rebuild header!)
             
-            // Check if existing content has the old "Files Shared" section
+            // ✅ Remove old "Files Shared" section if exists (files are now inline)
             $existingWithoutFiles = $existingContent;
             if (preg_match('/\n\n={50}\n\[Files Shared/', $existingContent, $matches, PREG_OFFSET_CAPTURE)) {
-                // Remove old files section
                 $existingWithoutFiles = substr($existingContent, 0, $matches[0][1]);
             }
             
-            // Append new messages
-            $mergedContent = $existingWithoutFiles . "\n" . $newMessagesText;
+            // Append new messages (files are already inline in $newMessagesText)
+            $mergedContent = $existingWithoutFiles . "\n\n" . $newMessagesText;
             
-            // Re-add files section if there are any
-            if (!empty($mergedFiles)) {
-                $mergedContent .= "\n\n" . str_repeat("=", 50) . "\n";
-                $mergedContent .= "[Files Shared in This Conversation]\n";
-                foreach ($mergedFiles as $file) {
-                    $sharedByName = $file['shared_by_name'] ?? $file['shared_by'];
-                    $mergedContent .= "- {$file['name']} ({$file['type']}) shared by @{$sharedByName}\n";
-                }
-            }
+            // ✅ Files are now shown INLINE with messages (no separate section needed)
             
             // Re-upload merged transcript to Cloudinary
             try {
