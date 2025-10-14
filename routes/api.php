@@ -16,6 +16,7 @@ use App\Http\Controllers\PricingTierController;
 use App\Http\Controllers\TeamController;
 use App\Http\Controllers\StripeWebhookController;
 use App\Http\Controllers\FeedbackController;
+use App\Http\Controllers\FeedbackDashboardController;
 
 Route::post('auth/register', [AuthController::class, 'register']);
 Route::post('auth/login', [AuthController::class, 'login']);
@@ -166,8 +167,15 @@ Route::middleware('auth:sanctum')->group(function () {
     
     // Feedback System
     Route::post('feedback', [FeedbackController::class, 'store']);
-    Route::get('feedback/{messageId}', [FeedbackController::class, 'show']);
     Route::get('feedback/analytics', [FeedbackController::class, 'analytics']);
+    
+    // Feedback Dashboard (MUST come before parameterized routes)
+    Route::get('feedback/dashboard', [FeedbackDashboardController::class, 'index']);
+    Route::get('feedback/export', [FeedbackDashboardController::class, 'export']);
+    Route::get('feedback/conversation/{conversationId}', [FeedbackDashboardController::class, 'conversationFeedback']);
+    
+    // Parameterized routes (MUST come after specific routes)
+    Route::get('feedback/{messageId}', [FeedbackController::class, 'show']);
     
     // DEBUG: Check running jobs
     Route::get('debug/running-jobs', function() {
