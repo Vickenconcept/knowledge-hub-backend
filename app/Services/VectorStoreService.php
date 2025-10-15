@@ -29,35 +29,64 @@ class VectorStoreService
     {
         try {
             $updatedCount = 0;
+            $driver = DB::connection()->getDriverName();
             
             foreach ($vectors as $vector) {
-                // Pack float array into binary BLOB (1536 floats * 4 bytes = 6144 bytes)
+                // Pack float array into binary (1536 floats * 4 bytes = 6144 bytes)
                 $packed = pack('f*', ...$vector['values']);
                 
-                // Update the chunk with the embedding
-                $updated = DB::table('chunks')
-                    ->where('id', $vector['id'])
-                    ->update(['embedding' => $packed]);
+                // For PostgreSQL, we need to use bytea hex format
+                if ($driver === 'pgsql') {
+                    // Convert binary to PostgreSQL hex format: \x + hex string
+                    $hexData = '\\x' . bin2hex($packed);
+                    
+                    // Use raw SQL for PostgreSQL BYTEA
+                    $updated = DB::update(
+                        'UPDATE chunks SET embedding = ?::bytea WHERE id = ?',
+                        [$hexData, $vector['id']]
+                    );
+                } else {
+                    // MySQL BLOB works fine with packed binary
+                    $updated = DB::table('chunks')
+                        ->where('id', $vector['id'])
+                        ->update(['embedding' => $packed]);
+                }
                 
                 if ($updated) {
                     $updatedCount++;
+                } else {
+                    Log::warning('⚠️ Failed to update chunk embedding', [
+                        'chunk_id' => $vector['id'],
+                        'driver' => $driver
+                    ]);
                 }
             }
             
-            Log::info('✅ Vectors stored in MySQL', [
+            Log::info('✅ Vectors stored in database', [
+                'driver' => $driver,
                 'total_vectors' => count($vectors),
                 'updated_count' => $updatedCount,
                 'org_id' => $orgId ?? $namespace,
             ]);
             
-            // Note: We no longer track vector upsert costs since storage is now free (local MySQL)
+            // If some updates failed, log it
+            if ($updatedCount < count($vectors)) {
+                Log::warning('⚠️ Some vectors failed to store', [
+                    'expected' => count($vectors),
+                    'stored' => $updatedCount,
+                    'failed' => count($vectors) - $updatedCount
+                ]);
+            }
+            
+            // Note: We no longer track vector upsert costs since storage is now free (local DB)
             // The only cost is OpenAI embeddings, which is tracked in EmbeddingService
             
             return [];
         } catch (\Exception $e) {
             Log::error('❌ VectorStore upsert failed', [
                 'error' => $e->getMessage(),
-                'trace' => $e->getTraceAsString()
+                'trace' => $e->getTraceAsString(),
+                'driver' => DB::connection()->getDriverName()
             ]);
             return [];
         }
@@ -84,9 +113,9 @@ class VectorStoreService
             
             if (empty($filterOrgId)) {
                 Log::warning('⚠️ No organization ID provided for vector query');
-                return [];
-            }
-            
+            return [];
+        }
+
             // Build query to get all chunks with embeddings for this org
             $query = DB::table('chunks')
                 ->where('chunks.org_id', $filterOrgId)
@@ -118,9 +147,28 @@ class VectorStoreService
             
             // Calculate cosine similarity for each chunk
             $scored = [];
+            $driver = DB::connection()->getDriverName();
+            
             foreach ($chunks as $chunk) {
-                // Unpack binary BLOB to float array
-                $chunkVector = unpack('f*', $chunk->embedding);
+                // Handle different binary formats for MySQL vs PostgreSQL
+                $binaryData = $chunk->embedding;
+                
+                if ($driver === 'pgsql' && is_resource($binaryData)) {
+                    // PostgreSQL returns BYTEA as a stream resource
+                    $binaryData = stream_get_contents($binaryData);
+                }
+                
+                // Unpack binary to float array
+                $chunkVector = unpack('f*', $binaryData);
+                
+                if (empty($chunkVector)) {
+                    Log::warning('⚠️ Failed to unpack embedding', [
+                        'chunk_id' => $chunk->id,
+                        'embedding_type' => gettype($chunk->embedding),
+                        'driver' => $driver
+                    ]);
+                    continue;
+                }
                 
                 // Calculate cosine similarity
                 $score = $this->cosineSimilarity($embedding, array_values($chunkVector));

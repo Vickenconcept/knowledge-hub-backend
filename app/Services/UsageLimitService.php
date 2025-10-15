@@ -193,6 +193,18 @@ class UsageLimitService
                 ->first();
         }
         
+        // If still no pricing tier found (fresh database), use generous defaults
+        if (!$billing) {
+            return [
+                'has_limits' => false,
+                'tier_name' => 'Unlimited',
+                'max_users' => 999999,
+                'max_documents' => 999999,
+                'max_chat_queries_per_month' => 999999,
+                'max_monthly_spend' => 999999,
+            ];
+        }
+        
         return [
             'has_limits' => true,
             'tier_name' => $billing->display_name ?? 'Free',

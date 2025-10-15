@@ -12,15 +12,36 @@ return new class extends Migration
      */
     public function up(): void
     {
-        // Use raw SQL to add MEDIUMBLOB column (Laravel doesn't have mediumBlob() method)
-        DB::statement('ALTER TABLE chunks ADD COLUMN embedding MEDIUMBLOB NULL AFTER text');
+        $driver = DB::connection()->getDriverName();
+        
+        // Add embedding column based on database type
+        if ($driver === 'pgsql') {
+            // PostgreSQL: Use BYTEA for binary data
+            DB::statement('ALTER TABLE chunks ADD COLUMN embedding BYTEA NULL');
+        } else {
+            // MySQL: Use MEDIUMBLOB
+            DB::statement('ALTER TABLE chunks ADD COLUMN embedding MEDIUMBLOB NULL AFTER text');
+        }
         
         // Ensure org_id index exists for faster filtering during vector search
-        // Check if index already exists before adding
-        $indexExists = DB::select("SHOW INDEX FROM chunks WHERE Key_name = 'chunks_org_id_index'");
-        
-        if (empty($indexExists)) {
-            DB::statement('CREATE INDEX chunks_org_id_index ON chunks(org_id)');
+        if ($driver === 'pgsql') {
+            // PostgreSQL: Check index existence
+            $indexExists = DB::select("
+                SELECT 1 FROM pg_indexes 
+                WHERE tablename = 'chunks' 
+                AND indexname = 'chunks_org_id_index'
+            ");
+            
+            if (empty($indexExists)) {
+                DB::statement('CREATE INDEX chunks_org_id_index ON chunks(org_id)');
+            }
+        } else {
+            // MySQL: Check index existence
+            $indexExists = DB::select("SHOW INDEX FROM chunks WHERE Key_name = 'chunks_org_id_index'");
+            
+            if (empty($indexExists)) {
+                DB::statement('CREATE INDEX chunks_org_id_index ON chunks(org_id)');
+            }
         }
     }
 
@@ -29,8 +50,20 @@ return new class extends Migration
      */
     public function down(): void
     {
+        $driver = DB::connection()->getDriverName();
+        
         // Drop the embedding column if it exists
-        $columnExists = DB::select("SHOW COLUMNS FROM chunks LIKE 'embedding'");
+        if ($driver === 'pgsql') {
+            // PostgreSQL: Check column existence
+            $columnExists = DB::select("
+                SELECT 1 FROM information_schema.columns 
+                WHERE table_name = 'chunks' 
+                AND column_name = 'embedding'
+            ");
+        } else {
+            // MySQL: Check column existence
+            $columnExists = DB::select("SHOW COLUMNS FROM chunks LIKE 'embedding'");
+        }
         
         if (!empty($columnExists)) {
             DB::statement('ALTER TABLE chunks DROP COLUMN embedding');

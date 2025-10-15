@@ -111,21 +111,30 @@ class ConnectorController extends Controller
             ]);
         }
 
+        // Ensure stats is an array (handle PostgreSQL JSON type)
+        $stats = is_array($job->stats) ? $job->stats : json_decode($job->stats, true) ?? [];
+        
         // Calculate progress percentage based on connector type
         $progressPercentage = 0;
-        if (isset($job->stats['total_channels']) && $job->stats['total_channels'] > 0) {
+        if (isset($stats['total_channels']) && $stats['total_channels'] > 0) {
             // Slack: use channels
-            $progressPercentage = round(($job->stats['processed_channels'] / $job->stats['total_channels']) * 100, 1);
-        } elseif (isset($job->stats['total_files']) && $job->stats['total_files'] > 0) {
+            $progressPercentage = round(($stats['processed_channels'] / $stats['total_channels']) * 100, 1);
+        } elseif (isset($stats['total_files']) && $stats['total_files'] > 0) {
             // Google Drive, Dropbox: use files
-            $progressPercentage = round(($job->stats['processed_files'] / $job->stats['total_files']) * 100, 1);
+            $progressPercentage = round(($stats['processed_files'] / $stats['total_files']) * 100, 1);
         }
+        
+        \Log::debug('Job status API response', [
+            'connector_id' => $connectorId,
+            'progress_percentage' => $progressPercentage,
+            'stats' => $stats,
+        ]);
         
         return response()->json([
             'has_job' => true,
             'job_id' => $job->id,
             'status' => $job->status,
-            'stats' => $job->stats,
+            'stats' => $stats,
             'created_at' => $job->created_at,
             'finished_at' => $job->finished_at,
             'progress_percentage' => $progressPercentage,

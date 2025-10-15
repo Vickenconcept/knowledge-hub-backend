@@ -13,8 +13,8 @@ return new class extends Migration
     {
         Schema::create('feedback', function (Blueprint $table) {
             $table->id();
-            $table->char('conversation_id', 36); // UUID to match conversations table
-            $table->char('message_id', 36); // UUID to match messages table
+            $table->uuid('conversation_id'); // UUID to match conversations table
+            $table->uuid('message_id'); // UUID to match messages table
             $table->unsignedBigInteger('user_id');
             $table->enum('rating', ['up', 'down'])->comment('👍 or 👎 rating');
             $table->text('comment')->nullable()->comment('Optional feedback comment');
