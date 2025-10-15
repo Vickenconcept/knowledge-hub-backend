@@ -184,23 +184,47 @@ class FeedbackDashboardController extends Controller
                 });
 
             // Feedback by time of day
-            $feedbackByHour = $feedbackQuery->clone()
-                ->selectRaw('HOUR(created_at) as hour, rating, COUNT(*) as count')
-                ->groupBy('hour', 'rating')
-                ->orderBy('hour')
-                ->get()
-                ->groupBy('hour')
-                ->map(function ($hourData) {
-                    $positive = $hourData->where('rating', 'up')->sum('count');
-                    $negative = $hourData->where('rating', 'down')->sum('count');
-                    return [
-                        'hour' => $hourData->first()->hour,
-                        'positive' => $positive,
-                        'negative' => $negative,
-                        'total' => $positive + $negative,
-                    ];
-                })
-                ->values();
+            $driver = DB::connection()->getDriverName();
+            
+            if ($driver === 'pgsql') {
+                // PostgreSQL: Use EXTRACT for hour
+                $feedbackByHour = $feedbackQuery->clone()
+                    ->selectRaw('EXTRACT(HOUR FROM created_at) as hour, rating, COUNT(*) as count')
+                    ->groupBy(DB::raw('EXTRACT(HOUR FROM created_at)'), 'rating')
+                    ->orderBy(DB::raw('EXTRACT(HOUR FROM created_at)'))
+                    ->get()
+                    ->groupBy('hour')
+                    ->map(function ($hourData) {
+                        $positive = $hourData->where('rating', 'up')->sum('count');
+                        $negative = $hourData->where('rating', 'down')->sum('count');
+                        return [
+                            'hour' => (int)$hourData->first()->hour,
+                            'positive' => $positive,
+                            'negative' => $negative,
+                            'total' => $positive + $negative,
+                        ];
+                    })
+                    ->values();
+            } else {
+                // MySQL: Use HOUR function
+                $feedbackByHour = $feedbackQuery->clone()
+                    ->selectRaw('HOUR(created_at) as hour, rating, COUNT(*) as count')
+                    ->groupBy('hour', 'rating')
+                    ->orderBy('hour')
+                    ->get()
+                    ->groupBy('hour')
+                    ->map(function ($hourData) {
+                        $positive = $hourData->where('rating', 'up')->sum('count');
+                        $negative = $hourData->where('rating', 'down')->sum('count');
+                        return [
+                            'hour' => $hourData->first()->hour,
+                            'positive' => $positive,
+                            'negative' => $negative,
+                            'total' => $positive + $negative,
+                        ];
+                    })
+                    ->values();
+            }
 
             return response()->json([
                 'success' => true,

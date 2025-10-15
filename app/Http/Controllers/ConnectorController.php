@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\Connector;
 use App\Models\IngestJob;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use App\Jobs\IngestConnectorJob;
 use Google\Client as GoogleClient;
@@ -273,6 +274,41 @@ class ConnectorController extends Controller
             'documents_count' => $connector->documents()->count(),
         ]);
 
+        // For Slack: Leave all joined channels before disconnecting
+        if ($connector->type === 'slack') {
+            try {
+                $tokens = $connector->encrypted_tokens ? json_decode(decrypt($connector->encrypted_tokens), true) : null;
+                $accessToken = $tokens['access_token'] ?? null;
+                
+                if ($accessToken) {
+                    $joinedChannels = $connector->metadata['joined_channels'] ?? [];
+                    
+                    if (!empty($joinedChannels)) {
+                        \Log::info('Leaving Slack channels before disconnect', [
+                            'connector_id' => $connector->id,
+                            'channels_to_leave' => count($joinedChannels),
+                        ]);
+                        
+                        $slack = new \App\Services\SlackService();
+                        $leaveResults = $slack->leaveChannels($accessToken, $joinedChannels);
+                        
+                        \Log::info('Left Slack channels', [
+                            'connector_id' => $connector->id,
+                            'total' => $leaveResults['total'],
+                            'succeeded' => $leaveResults['succeeded'],
+                            'failed' => $leaveResults['failed'],
+                        ]);
+                    }
+                }
+            } catch (\Exception $e) {
+                \Log::warning('Could not leave Slack channels', [
+                    'connector_id' => $connector->id,
+                    'error' => $e->getMessage(),
+                ]);
+                // Continue with deletion even if leaving channels fails
+            }
+        }
+
         // Delete associated data
         // Note: Documents, chunks, and ingest jobs will be cascade deleted
         // if foreign keys are set up, otherwise delete manually
@@ -280,30 +316,30 @@ class ConnectorController extends Controller
         $documentsCount = $connector->documents()->count();
         $chunksCount = $connector->chunks()->count();
         
-        // Get document IDs and chunk IDs for Pinecone deletion
+        // Get document IDs and chunk IDs for vector deletion
         $documentIds = $connector->documents()->pluck('id')->toArray();
         
-        // Get all chunk IDs to delete from Pinecone
+        // Get all chunk IDs to delete vectors
         $chunkIds = \App\Models\Chunk::whereIn('document_id', $documentIds)
             ->pluck('id')
             ->toArray();
         
-        // Delete from Pinecone FIRST (before deleting from database)
+        // Delete vectors from database (set embedding to NULL)
         if (!empty($chunkIds)) {
             try {
                 $vectorStore = new \App\Services\VectorStoreService();
                 $vectorStore->delete($chunkIds);
                 
-                \Log::info('Deleted vectors from Pinecone', [
+                \Log::info('Deleted vectors from database', [
                     'chunk_count' => count($chunkIds),
                     'connector_id' => $connector->id,
                 ]);
             } catch (\Exception $e) {
-                \Log::warning('Could not delete vectors from Pinecone', [
+                \Log::warning('Could not delete vectors', [
                     'error' => $e->getMessage(),
                     'chunk_count' => count($chunkIds),
                 ]);
-                // Continue with deletion even if Pinecone fails
+                // Continue with deletion even if vector cleanup fails
             }
         }
         
@@ -321,6 +357,7 @@ class ConnectorController extends Controller
 
         \Log::info('Connector deleted successfully', [
             'connector_id' => $id,
+            'type' => $connector->type,
             'documents_deleted' => $documentsCount,
             'chunks_deleted' => $chunksCount,
         ]);
