@@ -235,7 +235,11 @@ class CostTrackingService
     }
 
     /**
-     * Track Pinecone vector query operation
+     * Track vector query operation
+     * 
+     * @deprecated Since 2025-10-15 - Vector queries are now free (MySQL-based)
+     * This method is kept for backward compatibility but does nothing.
+     * Vector search is now performed locally in MySQL with no external costs.
      */
     public static function trackVectorQuery(
         string $orgId,
@@ -243,32 +247,22 @@ class CostTrackingService
         int $topK = 6,
         ?string $conversationId = null
     ): void {
-        // Pinecone Serverless pricing: ~$0.15 per 1M queries
-        // We'll track queries as a unit cost
-        $costPerQuery = 0.00000015; // $0.15 / 1,000,000
-        $cost = $vectorCount * $costPerQuery;
+        // NO-OP: Vector queries are now free (MySQL-based)
+        // We no longer track costs for vector operations since they're performed locally
         
-        CostTracking::create([
-            'org_id' => $orgId,
-            'operation_type' => 'vector_query',
-            'model_used' => 'pinecone',
-            'provider' => 'pinecone',
-            'tokens_input' => $topK, // Store topK as a metric
-            'tokens_output' => 0,
-            'total_tokens' => $vectorCount,
-            'cost_usd' => $cost,
-            'conversation_id' => $conversationId,
-        ]);
-        
-        Log::info('Cost tracked: vector_query', [
+        Log::debug('Vector query performed (no cost - MySQL-based)', [
             'org_id' => $orgId,
             'vector_count' => $vectorCount,
-            'cost_usd' => $cost,
+            'top_k' => $topK,
         ]);
     }
 
     /**
-     * Track Pinecone vector upsert operation
+     * Track vector upsert operation
+     * 
+     * @deprecated Since 2025-10-15 - Vector storage is now free (MySQL-based)
+     * This method is kept for backward compatibility but does nothing.
+     * Vectors are now stored directly in MySQL chunks table with no external costs.
      */
     public static function trackVectorUpsert(
         string $orgId,
@@ -276,28 +270,13 @@ class CostTrackingService
         ?string $documentId = null,
         ?string $ingestJobId = null
     ): void {
-        // Pinecone storage: ~$0.30 per 1M vectors per month (prorated)
-        // We'll track upserts as a one-time storage allocation cost
-        $costPerVector = 0.00000030; // Approximate per vector
-        $cost = $vectorCount * $costPerVector;
+        // NO-OP: Vector storage is now free (MySQL-based)
+        // We no longer track costs for vector operations since they're stored in MySQL
         
-        CostTracking::create([
-            'org_id' => $orgId,
-            'operation_type' => 'vector_upsert',
-            'model_used' => 'pinecone',
-            'provider' => 'pinecone',
-            'tokens_input' => 0,
-            'tokens_output' => 0,
-            'total_tokens' => $vectorCount,
-            'cost_usd' => $cost,
-            'document_id' => $documentId,
-            'ingest_job_id' => $ingestJobId,
-        ]);
-        
-        Log::info('Cost tracked: vector_upsert', [
+        Log::debug('Vectors stored in MySQL (no cost - local storage)', [
             'org_id' => $orgId,
             'vector_count' => $vectorCount,
-            'cost_usd' => $cost,
+            'document_id' => $documentId,
         ]);
     }
 
