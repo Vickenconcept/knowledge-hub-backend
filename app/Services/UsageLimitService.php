@@ -64,16 +64,26 @@ class UsageLimitService
         }
         
         // Count CURRENT documents (for display)
+        // Exclude system guide documents from quota
         $currentDocumentCount = DB::table('documents')
             ->where('org_id', $orgId)
+            ->where(function($query) {
+                $query->where('doc_type', '!=', 'guide')
+                      ->orWhereNull('doc_type');
+            })
             ->count();
         
         // Count MONTHLY document ingestion (to prevent gaming)
         // Strategy: Use documents.created_at as source of truth
         // This counts all documents created this month, even if later deleted
+        // Exclude system guide documents from quota
         $monthlyIngestion = DB::table('documents')
             ->where('org_id', $orgId)
             ->where('created_at', '>=', now()->startOfMonth())
+            ->where(function($query) {
+                $query->where('doc_type', '!=', 'guide')
+                      ->orWhereNull('doc_type');
+            })
             ->count();
         
         // NOTE: We also track in cost_tracking for historical audit,

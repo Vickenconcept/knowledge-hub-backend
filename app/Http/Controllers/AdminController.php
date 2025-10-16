@@ -18,7 +18,10 @@ class AdminController extends Controller
         return response()->json([
             'org_count' => Organization::count(),
             'user_count' => User::count(),
-            'document_count' => Document::count(),
+            'document_count' => Document::where(function($query) {
+                $query->where('doc_type', '!=', 'guide')
+                      ->orWhereNull('doc_type');
+            })->count(),
             'chunk_count' => Chunk::count(),
         ]);
     }
