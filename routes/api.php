@@ -4,6 +4,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\ChatController;
 use App\Http\Controllers\AuthController;
+use App\Http\Controllers\SocialAuthController;
 use App\Http\Controllers\ConnectorController;
 use App\Http\Controllers\DocumentController;
 use App\Http\Controllers\AdminController;
@@ -22,6 +23,10 @@ use App\Http\Controllers\FeedbackDashboardController;
 
 Route::post('auth/register', [AuthController::class, 'register']);
 Route::post('auth/login', [AuthController::class, 'login']);
+
+// Google OAuth
+Route::get('auth/google', [SocialAuthController::class, 'redirectToGoogle']);
+Route::get('auth/google/callback', [SocialAuthController::class, 'handleGoogleCallback']);
 
 // Stripe Webhook (no auth required)
 Route::post('webhooks/stripe', [StripeWebhookController::class, 'handleWebhook']);

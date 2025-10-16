@@ -16,6 +16,8 @@ return new class extends Migration
             $table->uuid('org_id');
             $table->unsignedBigInteger('user_id');
             $table->string('title')->nullable();
+            $table->string('response_style')->default('comprehensive')->comment('Response format: comprehensive, structured_profile, summary_report, qa_friendly, bullet_brief, etc.');
+            $table->json('preferences')->nullable()->comment('Detail level, tone, include_sources, max_length, etc.');
             $table->timestamp('last_message_at')->nullable();
             $table->timestamps();
 

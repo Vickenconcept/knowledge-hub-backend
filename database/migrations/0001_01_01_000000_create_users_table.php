@@ -17,6 +17,9 @@ return new class extends Migration
             $table->string('role')->default('user');
             $table->string('name');
             $table->string('email')->unique();
+            $table->string('google_id')->nullable()->unique();
+            $table->string('default_response_style')->default('comprehensive');
+            $table->json('ai_preferences')->nullable();
             $table->timestamp('email_verified_at')->nullable();
             $table->string('password');
             $table->rememberToken();

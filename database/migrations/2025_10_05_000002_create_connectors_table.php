@@ -14,6 +14,7 @@ return new class extends Migration
             $table->string('type');
             $table->string('label')->nullable();
             $table->text('encrypted_tokens')->nullable();
+            $table->json('metadata')->nullable();
             $table->string('status')->default('disconnected');
             $table->timestamp('last_synced_at')->nullable();
             $table->timestamps();

@@ -60,6 +60,9 @@ class AuthController extends Controller
             $organization->owner_id = $user->id;
             $organization->save();
             
+            // Create getting started guide for new organization
+            \App\Services\OnboardingService::createGettingStartedGuide($organization);
+            
             Log::info('User set as organization owner', [
                 'user_id' => $user->id,
                 'org_id' => $orgId,

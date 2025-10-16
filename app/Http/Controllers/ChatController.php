@@ -336,6 +336,7 @@ class ChatController extends Controller
                 // Get connector type to determine source type
                 $connector = $chunk->document->connector;
                 $sourceType = 'Unknown'; // Default
+                
                 if ($connector) {
                     $sourceType = match($connector->type) {
                         'google_drive' => 'Google Drive',
@@ -344,6 +345,18 @@ class ChatController extends Controller
                         'dropbox' => 'Dropbox',
                         default => ucfirst(str_replace('_', ' ', $connector->type))
                     };
+                } else {
+                    // Check if it's a system document or uploaded file
+                    $docMetadata = is_string($chunk->document->metadata) 
+                        ? json_decode($chunk->document->metadata, true) 
+                        : $chunk->document->metadata;
+                    $isSystemDoc = $docMetadata['is_system_document'] ?? false;
+                    
+                    if ($isSystemDoc || $chunk->document->doc_type === 'guide') {
+                        $sourceType = 'KHub Guide';
+                    } elseif ($chunk->document->s3_path) {
+                        $sourceType = 'Uploaded';
+                    }
                 }
 
                 // If document not yet in sources, add it
