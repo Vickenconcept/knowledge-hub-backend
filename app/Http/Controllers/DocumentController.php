@@ -18,7 +18,13 @@ class DocumentController extends Controller
     {
         $orgId = $request->user()->org_id;
         
+        // Exclude system documents (like getting started guide) from the documents list
+        // They're searchable in chat but shouldn't clutter the documents page
         $docs = Document::where('org_id', $orgId)
+            ->where(function($query) {
+                $query->where('doc_type', '!=', 'guide')
+                      ->orWhereNull('doc_type');
+            })
             ->with('connector')
             ->withCount('chunks')
             ->orderByDesc('created_at')
@@ -28,6 +34,7 @@ class DocumentController extends Controller
         $formatted = $docs->getCollection()->map(function($doc) {
             $connector = $doc->connector;
             $sourceType = 'Unknown';
+            
             if ($connector) {
                 $sourceType = match($connector->type) {
                     'google_drive' => 'Google Drive',
@@ -36,13 +43,23 @@ class DocumentController extends Controller
                     'dropbox' => 'Dropbox',
                     default => ucfirst(str_replace('_', ' ', $connector->type))
                 };
+            } else {
+                // Check if it's a system document
+                $metadata = is_string($doc->metadata) ? json_decode($doc->metadata, true) : $doc->metadata;
+                $isSystemDoc = $metadata['is_system_document'] ?? false;
+                
+                if ($isSystemDoc || $doc->doc_type === 'guide') {
+                    $sourceType = 'KHub Guide';
+                } elseif ($doc->s3_path) {
+                    $sourceType = 'Uploaded';
+                }
             }
             
             return [
                 'id' => $doc->id,
                 'title' => $doc->title,
                 'source' => $sourceType,
-                'source_url' => $doc->s3_path ?: $doc->source_url, // Use Cloudinary URL if available, fallback to source_url
+                'source_url' => $doc->s3_path ?: $doc->source_url,
                 'mime_type' => $doc->mime_type,
                 'doc_type' => $doc->doc_type,
                 'tags' => $doc->tags ?? [],

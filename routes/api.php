@@ -4,20 +4,29 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\ChatController;
 use App\Http\Controllers\AuthController;
+use App\Http\Controllers\SocialAuthController;
 use App\Http\Controllers\ConnectorController;
 use App\Http\Controllers\DocumentController;
 use App\Http\Controllers\AdminController;
 use App\Http\Controllers\IngestJobController;
-use App\Http\Controllers\DropboxController;
+use App\Http\Controllers\Connectors\DropboxController;
+use App\Http\Controllers\Connectors\GoogleDriveController;
+use App\Http\Controllers\Connectors\SlackController;
 use App\Http\Controllers\CostTrackingController;
 use App\Http\Controllers\BillingController;
 use App\Http\Controllers\SubscriptionController;
 use App\Http\Controllers\PricingTierController;
 use App\Http\Controllers\TeamController;
 use App\Http\Controllers\StripeWebhookController;
+use App\Http\Controllers\FeedbackController;
+use App\Http\Controllers\FeedbackDashboardController;
 
 Route::post('auth/register', [AuthController::class, 'register']);
 Route::post('auth/login', [AuthController::class, 'login']);
+
+// Google OAuth
+Route::get('auth/google', [SocialAuthController::class, 'redirectToGoogle']);
+Route::get('auth/google/callback', [SocialAuthController::class, 'handleGoogleCallback']);
 
 // Stripe Webhook (no auth required)
 Route::post('webhooks/stripe', [StripeWebhookController::class, 'handleWebhook']);
@@ -100,14 +109,15 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('connectors/{connectorId}/job-status', [ConnectorController::class, 'getJobStatus']);
 
     // Google Drive OAuth
-    Route::get('connectors/google-drive/auth-url', [ConnectorController::class, 'getGoogleDriveAuthUrl']);
+    Route::get('connectors/google-drive/auth-url', [GoogleDriveController::class, 'getAuthUrl']);
     
     // Dropbox Integration
     Route::get('connectors/dropbox/auth-url', [DropboxController::class, 'authUrl']);
     Route::post('connectors/dropbox/{id}/disconnect', [DropboxController::class, 'disconnect']);
     
     // Slack Integration
-    Route::get('connectors/slack/auth-url', [ConnectorController::class, 'getSlackAuthUrl']);
+    Route::get('connectors/slack/auth-url', [SlackController::class, 'getAuthUrl']);
+    Route::post('connectors/slack/{id}/disconnect', [SlackController::class, 'disconnect']);
 
     // Documents
     Route::get('documents', [DocumentController::class, 'index']);
@@ -162,6 +172,18 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('team/invite', [TeamController::class, 'invite']);
     Route::put('team/{id}/role', [TeamController::class, 'updateRole']);
     Route::delete('team/{id}', [TeamController::class, 'remove']);
+    
+    // Feedback System
+    Route::post('feedback', [FeedbackController::class, 'store']);
+    Route::get('feedback/analytics', [FeedbackController::class, 'analytics']);
+    
+    // Feedback Dashboard (MUST come before parameterized routes)
+    Route::get('feedback/dashboard', [FeedbackDashboardController::class, 'index']);
+    Route::get('feedback/export', [FeedbackDashboardController::class, 'export']);
+    Route::get('feedback/conversation/{conversationId}', [FeedbackDashboardController::class, 'conversationFeedback']);
+    
+    // Parameterized routes (MUST come after specific routes)
+    Route::get('feedback/{messageId}', [FeedbackController::class, 'show']);
     
     // DEBUG: Check running jobs
     Route::get('debug/running-jobs', function() {

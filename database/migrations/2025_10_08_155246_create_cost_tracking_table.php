@@ -3,18 +3,18 @@
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Facades\DB;
 
 return new class extends Migration
 {
     public function up(): void
     {
-        Schema::create('cost_tracking', function (Blueprint $table) {
+        $driver = DB::connection()->getDriverName();
+        
+        Schema::create('cost_tracking', function (Blueprint $table) use ($driver) {
             $table->uuid('id')->primary();
             $table->uuid('org_id')->index();
             $table->unsignedBigInteger('user_id')->nullable();
-            
-            // Operation type
-            $table->enum('operation_type', ['embedding', 'chat', 'summarization'])->index();
             
             // API details
             $table->string('model_used'); // e.g., text-embedding-3-small, gpt-4o-mini
@@ -39,12 +39,32 @@ return new class extends Migration
             
             // Indexes for analytics
             $table->index(['org_id', 'created_at']);
-            $table->index(['org_id', 'operation_type', 'created_at']);
             
             // Foreign keys
             $table->foreign('org_id')->references('id')->on('organizations')->onDelete('cascade');
             $table->foreign('user_id')->references('id')->on('users')->onDelete('set null');
         });
+        
+        // Add operation_type column with database-specific implementation
+        if ($driver === 'pgsql') {
+            // PostgreSQL: VARCHAR with CHECK constraint
+            DB::statement("ALTER TABLE cost_tracking ADD COLUMN operation_type VARCHAR(50) NOT NULL DEFAULT 'embedding'");
+            DB::statement("
+                ALTER TABLE cost_tracking 
+                ADD CONSTRAINT cost_tracking_operation_type_check 
+                CHECK (operation_type IN ('embedding', 'chat', 'summarization', 'vector_query', 'vector_upsert', 'file_pull', 'document_ingestion'))
+            ");
+            DB::statement("CREATE INDEX cost_tracking_operation_type_index ON cost_tracking(operation_type)");
+            DB::statement("CREATE INDEX cost_tracking_org_operation_created_index ON cost_tracking(org_id, operation_type, created_at)");
+        } else {
+            // MySQL: ENUM
+            DB::statement("
+                ALTER TABLE cost_tracking 
+                ADD COLUMN operation_type ENUM('embedding', 'chat', 'summarization', 'vector_query', 'vector_upsert', 'file_pull', 'document_ingestion') NOT NULL DEFAULT 'embedding' AFTER user_id
+            ");
+            DB::statement("CREATE INDEX cost_tracking_operation_type_index ON cost_tracking(operation_type)");
+            DB::statement("CREATE INDEX cost_tracking_org_operation_created_index ON cost_tracking(org_id, operation_type, created_at)");
+        }
     }
 
     public function down(): void

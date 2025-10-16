@@ -261,10 +261,29 @@ class SubscriptionService
         $currentTierName = $currentBilling->name ?? 'free';
         
         // Get all available tiers
-        $allTiers = DB::table('pricing_tiers')
-            ->where('is_active', true)
-            ->orderByRaw("FIELD(name, 'free', 'starter', 'pro', 'enterprise')")
-            ->get();
+        $driver = DB::connection()->getDriverName();
+        
+        if ($driver === 'pgsql') {
+            // PostgreSQL: Use CASE WHEN for custom order
+            $allTiers = DB::table('pricing_tiers')
+                ->where('is_active', true)
+                ->orderByRaw("
+                    CASE name 
+                        WHEN 'free' THEN 1 
+                        WHEN 'starter' THEN 2 
+                        WHEN 'pro' THEN 3 
+                        WHEN 'enterprise' THEN 4 
+                        ELSE 5 
+                    END
+                ")
+                ->get();
+        } else {
+            // MySQL: Use FIELD function
+            $allTiers = DB::table('pricing_tiers')
+                ->where('is_active', true)
+                ->orderByRaw("FIELD(name, 'free', 'starter', 'pro', 'enterprise')")
+                ->get();
+        }
         
         // Check current usage
         $usage = [

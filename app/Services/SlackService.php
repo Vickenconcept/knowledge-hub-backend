@@ -305,5 +305,71 @@ class SlackService
             ];
         }
     }
+
+    /**
+     * Leave a Slack channel
+     */
+    public function leaveChannel(string $accessToken, string $channelId): array
+    {
+        try {
+            $response = Http::withToken($accessToken)
+                ->timeout(60)
+                ->connectTimeout(30)
+                ->retry(3, 5000)
+                ->asForm()
+                ->post('https://slack.com/api/conversations.leave', [
+                    'channel' => $channelId,
+                ]);
+            
+            $data = $response->json();
+            
+            if (!$data['ok']) {
+                // If not in channel, that's fine - goal achieved
+                if ($data['error'] === 'not_in_channel') {
+                    return ['success' => true, 'already_left' => true];
+                }
+                throw new \Exception($data['error'] ?? 'Failed to leave channel');
+            }
+            
+            return ['success' => true, 'already_left' => false];
+        } catch (\Exception $e) {
+            return [
+                'success' => false,
+                'error' => $e->getMessage(),
+            ];
+        }
+    }
+    
+    /**
+     * Leave multiple channels in bulk
+     */
+    public function leaveChannels(string $accessToken, array $channelIds): array
+    {
+        $results = [
+            'total' => count($channelIds),
+            'succeeded' => 0,
+            'failed' => 0,
+            'errors' => [],
+        ];
+        
+        foreach ($channelIds as $channelId) {
+            $result = $this->leaveChannel($accessToken, $channelId);
+            
+            if ($result['success']) {
+                $results['succeeded']++;
+            } else {
+                $results['failed']++;
+                $results['errors'][] = [
+                    'channel_id' => $channelId,
+                    'error' => $result['error'] ?? 'Unknown error',
+                ];
+            }
+            
+            // Rate limiting: wait 1 second between leaves
+            sleep(1);
+        }
+        
+        return $results;
+    }
 }
 

@@ -103,10 +103,29 @@ class BillingController extends Controller
     public function getPricingTiers()
     {
         try {
-            $tiers = DB::table('pricing_tiers')
-                ->where('is_active', true)
-                ->orderByRaw("FIELD(name, 'free', 'starter', 'pro', 'enterprise')")
-                ->get();
+            $driver = DB::connection()->getDriverName();
+            
+            if ($driver === 'pgsql') {
+                // PostgreSQL: Use CASE WHEN for custom order
+                $tiers = DB::table('pricing_tiers')
+                    ->where('is_active', true)
+                    ->orderByRaw("
+                        CASE name 
+                            WHEN 'free' THEN 1 
+                            WHEN 'starter' THEN 2 
+                            WHEN 'pro' THEN 3 
+                            WHEN 'enterprise' THEN 4 
+                            ELSE 5 
+                        END
+                    ")
+                    ->get();
+            } else {
+                // MySQL: Use FIELD function
+                $tiers = DB::table('pricing_tiers')
+                    ->where('is_active', true)
+                    ->orderByRaw("FIELD(name, 'free', 'starter', 'pro', 'enterprise')")
+                    ->get();
+            }
             
             return response()->json([
                 'tiers' => $tiers,

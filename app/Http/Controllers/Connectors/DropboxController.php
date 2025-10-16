@@ -1,15 +1,32 @@
 <?php
 
-namespace App\Http\Controllers;
+namespace App\Http\Controllers\Connectors;
 
+use App\Http\Controllers\Controller;
 use App\Models\Connector;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
-class DropboxController extends Controller
+/**
+ * Dropbox Connector Controller
+ * 
+ * Handles OAuth authentication and integration with Dropbox
+ */
+class DropboxController extends BaseConnectorController
 {
+    protected function getConnectorType(): string
+    {
+        return 'dropbox';
+    }
+    
+    protected function getConnectorLabel(): string
+    {
+        return 'Dropbox';
+    }
+    
+
     /**
      * Get Dropbox OAuth authorization URL
      */
@@ -51,7 +68,7 @@ class DropboxController extends Controller
     /**
      * Handle OAuth callback from Dropbox
      */
-    public function callback(Request $request)
+    public function handleCallback(Request $request)
     {
         $code = $request->get('code');
         $state = $request->get('state');

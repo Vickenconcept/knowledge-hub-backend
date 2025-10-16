@@ -15,8 +15,25 @@ class PricingTierController extends Controller
     public function index()
     {
         try {
-            $tiers = PricingTier::orderByRaw("FIELD(name, 'free', 'starter', 'pro', 'enterprise')")
-                ->get();
+            // Database-agnostic custom ordering
+            $driver = DB::connection()->getDriverName();
+            
+            if ($driver === 'pgsql') {
+                // PostgreSQL: Use CASE WHEN for custom order
+                $tiers = PricingTier::orderByRaw("
+                    CASE name 
+                        WHEN 'free' THEN 1 
+                        WHEN 'starter' THEN 2 
+                        WHEN 'pro' THEN 3 
+                        WHEN 'enterprise' THEN 4 
+                        ELSE 5 
+                    END
+                ")->get();
+            } else {
+                // MySQL: Use FIELD function
+                $tiers = PricingTier::orderByRaw("FIELD(name, 'free', 'starter', 'pro', 'enterprise')")
+                    ->get();
+            }
             
             // Add subscriber count to each tier
             $tiersWithStats = $tiers->map(function($tier) {

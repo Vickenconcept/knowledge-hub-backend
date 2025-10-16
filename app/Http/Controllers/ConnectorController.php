@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\Connector;
 use App\Models\IngestJob;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use App\Jobs\IngestConnectorJob;
 use Google\Client as GoogleClient;
@@ -111,21 +112,30 @@ class ConnectorController extends Controller
             ]);
         }
 
+        // Ensure stats is an array (handle PostgreSQL JSON type)
+        $stats = is_array($job->stats) ? $job->stats : json_decode($job->stats, true) ?? [];
+        
         // Calculate progress percentage based on connector type
         $progressPercentage = 0;
-        if (isset($job->stats['total_channels']) && $job->stats['total_channels'] > 0) {
+        if (isset($stats['total_channels']) && $stats['total_channels'] > 0) {
             // Slack: use channels
-            $progressPercentage = round(($job->stats['processed_channels'] / $job->stats['total_channels']) * 100, 1);
-        } elseif (isset($job->stats['total_files']) && $job->stats['total_files'] > 0) {
+            $progressPercentage = round(($stats['processed_channels'] / $stats['total_channels']) * 100, 1);
+        } elseif (isset($stats['total_files']) && $stats['total_files'] > 0) {
             // Google Drive, Dropbox: use files
-            $progressPercentage = round(($job->stats['processed_files'] / $job->stats['total_files']) * 100, 1);
+            $progressPercentage = round(($stats['processed_files'] / $stats['total_files']) * 100, 1);
         }
+        
+        \Log::debug('Job status API response', [
+            'connector_id' => $connectorId,
+            'progress_percentage' => $progressPercentage,
+            'stats' => $stats,
+        ]);
         
         return response()->json([
             'has_job' => true,
             'job_id' => $job->id,
             'status' => $job->status,
-            'stats' => $job->stats,
+            'stats' => $stats,
             'created_at' => $job->created_at,
             'finished_at' => $job->finished_at,
             'progress_percentage' => $progressPercentage,
@@ -264,6 +274,41 @@ class ConnectorController extends Controller
             'documents_count' => $connector->documents()->count(),
         ]);
 
+        // For Slack: Leave all joined channels before disconnecting
+        if ($connector->type === 'slack') {
+            try {
+                $tokens = $connector->encrypted_tokens ? json_decode(decrypt($connector->encrypted_tokens), true) : null;
+                $accessToken = $tokens['access_token'] ?? null;
+                
+                if ($accessToken) {
+                    $joinedChannels = $connector->metadata['joined_channels'] ?? [];
+                    
+                    if (!empty($joinedChannels)) {
+                        \Log::info('Leaving Slack channels before disconnect', [
+                            'connector_id' => $connector->id,
+                            'channels_to_leave' => count($joinedChannels),
+                        ]);
+                        
+                        $slack = new \App\Services\SlackService();
+                        $leaveResults = $slack->leaveChannels($accessToken, $joinedChannels);
+                        
+                        \Log::info('Left Slack channels', [
+                            'connector_id' => $connector->id,
+                            'total' => $leaveResults['total'],
+                            'succeeded' => $leaveResults['succeeded'],
+                            'failed' => $leaveResults['failed'],
+                        ]);
+                    }
+                }
+            } catch (\Exception $e) {
+                \Log::warning('Could not leave Slack channels', [
+                    'connector_id' => $connector->id,
+                    'error' => $e->getMessage(),
+                ]);
+                // Continue with deletion even if leaving channels fails
+            }
+        }
+
         // Delete associated data
         // Note: Documents, chunks, and ingest jobs will be cascade deleted
         // if foreign keys are set up, otherwise delete manually
@@ -271,30 +316,30 @@ class ConnectorController extends Controller
         $documentsCount = $connector->documents()->count();
         $chunksCount = $connector->chunks()->count();
         
-        // Get document IDs and chunk IDs for Pinecone deletion
+        // Get document IDs and chunk IDs for vector deletion
         $documentIds = $connector->documents()->pluck('id')->toArray();
         
-        // Get all chunk IDs to delete from Pinecone
+        // Get all chunk IDs to delete vectors
         $chunkIds = \App\Models\Chunk::whereIn('document_id', $documentIds)
             ->pluck('id')
             ->toArray();
         
-        // Delete from Pinecone FIRST (before deleting from database)
+        // Delete vectors from database (set embedding to NULL)
         if (!empty($chunkIds)) {
             try {
                 $vectorStore = new \App\Services\VectorStoreService();
                 $vectorStore->delete($chunkIds);
                 
-                \Log::info('Deleted vectors from Pinecone', [
+                \Log::info('Deleted vectors from database', [
                     'chunk_count' => count($chunkIds),
                     'connector_id' => $connector->id,
                 ]);
             } catch (\Exception $e) {
-                \Log::warning('Could not delete vectors from Pinecone', [
+                \Log::warning('Could not delete vectors', [
                     'error' => $e->getMessage(),
                     'chunk_count' => count($chunkIds),
                 ]);
-                // Continue with deletion even if Pinecone fails
+                // Continue with deletion even if vector cleanup fails
             }
         }
         
@@ -312,6 +357,7 @@ class ConnectorController extends Controller
 
         \Log::info('Connector deleted successfully', [
             'connector_id' => $id,
+            'type' => $connector->type,
             'documents_deleted' => $documentsCount,
             'chunks_deleted' => $chunksCount,
         ]);
@@ -323,266 +369,6 @@ class ConnectorController extends Controller
                 'chunks' => $chunksCount,
             ],
         ]);
-    }
-
-    public function getGoogleDriveAuthUrl(Request $request)
-    {
-        $client = new GoogleClient();
-        $client->setClientId(env('GOOGLE_CLIENT_ID'));
-        $client->setClientSecret(env('GOOGLE_CLIENT_SECRET'));
-        $client->setRedirectUri(env('GOOGLE_REDIRECT_URI'));
-        $client->setAccessType('offline');
-        $client->setPrompt('consent'); // Force consent screen to ensure all scopes are granted
-        $client->addScope([
-            'https://www.googleapis.com/auth/drive.readonly',
-            'https://www.googleapis.com/auth/drive.metadata.readonly',
-            'https://www.googleapis.com/auth/drive.file',
-            'https://www.googleapis.com/auth/userinfo.email',
-            'https://www.googleapis.com/auth/userinfo.profile',
-        ]);
-
-        // Check if Google Drive connector already exists for this organization
-        $existingConnector = Connector::where('org_id', $request->user()->org_id)
-            ->where('type', 'google_drive')
-            ->first();
-
-        if ($existingConnector) {
-            // Update existing connector if it's disconnected
-            if ($existingConnector->status === 'disconnected') {
-                $connector = $existingConnector;
-            } else {
-                return response()->json(['message' => 'Google Drive is already connected for this organization'], 409);
-            }
-        } else {
-            // Create a new connector record
-            $connector = Connector::create([
-                'id' => (string) Str::uuid(),
-                'org_id' => $request->user()->org_id,
-                'type' => 'google_drive',
-                'label' => 'GDrive',
-                'status' => 'disconnected',
-            ]);
-        }
-
-        // State can include connector id to reconcile on callback
-        $state = json_encode(['connector_id' => $connector->id]);
-        $client->setState(base64_encode($state));
-
-        return response()->json([
-            'connector_id' => $connector->id,
-            'url' => $client->createAuthUrl(),
-        ]);
-    }
-
-    public function handleGoogleDriveCallback(Request $request)
-    {
-        \Log::info('Google Drive OAuth callback called', [
-            'method' => $request->method(),
-            'query_params' => $request->query(),
-            'headers' => $request->headers->all()
-        ]);
-
-        $code = (string) $request->query('code', '');
-        $stateB64 = (string) $request->query('state', '');
-        
-        \Log::info('OAuth callback params', [
-            'code_length' => strlen($code),
-            'state_b64_length' => strlen($stateB64),
-            'has_code' => !empty($code),
-            'has_state' => !empty($stateB64)
-        ]);
-        
-        if ($code === '' || $stateB64 === '') {
-            if ($request->isJson()) {
-                return response()->json(['message' => 'Missing code or state'], 422);
-            }
-            // For GET requests (Google redirect), redirect to frontend with error
-            return redirect(env('FRONTEND_URL', 'http://localhost:3000') . '/connectors?error=missing_code_or_state');
-        }
-
-        $state = json_decode(base64_decode($stateB64), true) ?: [];
-        $connectorId = $state['connector_id'] ?? null;
-        if (!$connectorId) {
-            if ($request->isJson()) {
-                return response()->json(['message' => 'Invalid state'], 422);
-            }
-            return redirect(env('FRONTEND_URL', 'http://localhost:3000') . '/connectors?error=invalid_state');
-        }
-
-        // Find the connector
-        $connector = Connector::find($connectorId);
-        if (!$connector) {
-            if ($request->isJson()) {
-                return response()->json(['message' => 'Connector not found'], 404);
-            }
-            return redirect(env('FRONTEND_URL', 'http://localhost:3000') . '/connectors?error=connector_not_found');
-        }
-
-        $client = new GoogleClient();
-        $client->setClientId(env('GOOGLE_CLIENT_ID'));
-        $client->setClientSecret(env('GOOGLE_CLIENT_SECRET'));
-        $client->setRedirectUri(env('GOOGLE_REDIRECT_URI'));
-
-        $token = $client->fetchAccessTokenWithAuthCode($code);
-        
-        \Log::info('Token exchange result', [
-            'has_error' => isset($token['error']),
-            'error' => $token['error'] ?? null,
-            'has_access_token' => isset($token['access_token']),
-            'has_refresh_token' => isset($token['refresh_token'])
-        ]);
-        
-        if (isset($token['error'])) {
-            \Log::error('OAuth token exchange failed', ['error' => $token['error']]);
-            if ($request->isJson()) {
-                return response()->json(['message' => 'OAuth error', 'error' => $token['error']], 400);
-            }
-            return redirect(env('FRONTEND_URL', 'http://localhost:3000') . '/connectors?error=oauth_error');
-        }
-
-        $connector->encrypted_tokens = encrypt(json_encode($token));
-        $connector->status = 'connected';
-        $connector->save();
-
-        \Log::info('Connector updated successfully', [
-            'connector_id' => $connector->id,
-            'status' => $connector->status,
-            'has_tokens' => !empty($connector->encrypted_tokens)
-        ]);
-
-        // ❌ REMOVED AUTO-TRIGGER: User must manually click "Sync" button
-        // IngestConnectorJob::dispatch($connector->id, $connector->org_id)->onQueue('default');
-
-        if ($request->isJson()) {
-            return response()->json([
-                'message' => 'Google Drive connected',
-                'connector' => $connector,
-            ]);
-        }
-
-        // For GET requests (Google redirect), redirect to frontend with success
-        return redirect(env('FRONTEND_URL', 'http://localhost:3000') . '/connectors?success=google_drive_connected');
-    }
-
-    /**
-     * Get Slack OAuth URL
-     */
-    public function getSlackAuthUrl(Request $request)
-    {
-        $slack = new \App\Services\SlackService();
-
-        // Check if Slack connector already exists for this organization
-        $existingConnector = Connector::where('org_id', $request->user()->org_id)
-            ->where('type', 'slack')
-            ->first();
-
-        if ($existingConnector) {
-            // Update existing connector if it's disconnected
-            if ($existingConnector->status === 'disconnected') {
-                $connector = $existingConnector;
-            } else {
-                return response()->json(['message' => 'Slack is already connected for this organization'], 409);
-            }
-        } else {
-            // Create a new connector record
-            $connector = Connector::create([
-                'id' => (string) Str::uuid(),
-                'org_id' => $request->user()->org_id,
-                'type' => 'slack',
-                'label' => 'Slack',
-                'status' => 'disconnected',
-            ]);
-        }
-
-        // State can include connector id to reconcile on callback
-        $state = base64_encode(json_encode(['connector_id' => $connector->id]));
-
-        return response()->json([
-            'connector_id' => $connector->id,
-            'url' => $slack->getAuthUrl($state),
-        ]);
-    }
-
-    /**
-     * Handle Slack OAuth callback
-     */
-    public function handleSlackCallback(Request $request)
-    {
-        \Log::info('Slack OAuth callback called', [
-            'method' => $request->method(),
-            'query_params' => $request->query(),
-        ]);
-
-        $code = (string) $request->query('code', '');
-        $stateB64 = (string) $request->query('state', '');
-        
-        if ($code === '' || $stateB64 === '') {
-            return redirect(env('FRONTEND_URL', 'http://localhost:3000') . '/connectors?error=missing_code_or_state');
-        }
-
-        $state = json_decode(base64_decode($stateB64), true) ?: [];
-        $connectorId = $state['connector_id'] ?? null;
-        
-        if (!$connectorId) {
-            return redirect(env('FRONTEND_URL', 'http://localhost:3000') . '/connectors?error=invalid_state');
-        }
-
-        // Find the connector
-        $connector = Connector::find($connectorId);
-        if (!$connector) {
-            return redirect(env('FRONTEND_URL', 'http://localhost:3000') . '/connectors?error=connector_not_found');
-        }
-
-        try {
-            $slack = new \App\Services\SlackService();
-            
-            // Exchange code for access token
-            $tokenData = $slack->exchangeCode($code);
-            
-            \Log::info('Slack OAuth token exchange successful', [
-                'connector_id' => $connector->id,
-                'team_id' => $tokenData['team_id'],
-                'team_name' => $tokenData['team_name'],
-            ]);
-
-            // Get team info
-            $teamInfo = $slack->getTeamInfo($tokenData['access_token']);
-
-            // Store tokens in encrypted_tokens column (like Google Drive and Dropbox)
-            $connector->encrypted_tokens = encrypt(json_encode([
-                'access_token' => $tokenData['access_token'], // Bot token (xoxb-)
-                'user_token' => $tokenData['user_token'] ?? null, // User token (xoxp-) - for files!
-                'team_id' => $tokenData['team_id'],
-                'team_name' => $tokenData['team_name'],
-            ]));
-            
-            $connector->metadata = [
-                'team_id' => $tokenData['team_id'],
-                'team_name' => $tokenData['team_name'],
-                'team_domain' => $teamInfo['domain'] ?? null,
-                'team_icon' => $teamInfo['icon']['image_68'] ?? null,
-                'user_id' => $tokenData['user_id'],
-                'bot_user_id' => $tokenData['bot_user_id'],
-            ];
-            $connector->label = $teamInfo['name'] ?? 'Slack';
-            $connector->status = 'connected';
-            $connector->save();
-
-            \Log::info('Slack connector saved successfully', [
-                'connector_id' => $connector->id,
-                'status' => $connector->status,
-            ]);
-
-        } catch (\Exception $e) {
-            \Log::error('Slack OAuth failed', [
-                'connector_id' => $connector->id,
-                'error' => $e->getMessage(),
-            ]);
-
-            return redirect(env('FRONTEND_URL', 'http://localhost:3000') . '/connectors?error=oauth_exchange_failed');
-        }
-
-        return redirect(env('FRONTEND_URL', 'http://localhost:3000') . '/connectors?success=slack_connected');
     }
 }
 
