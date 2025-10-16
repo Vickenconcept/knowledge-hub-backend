@@ -8,7 +8,9 @@ use App\Http\Controllers\ConnectorController;
 use App\Http\Controllers\DocumentController;
 use App\Http\Controllers\AdminController;
 use App\Http\Controllers\IngestJobController;
-use App\Http\Controllers\DropboxController;
+use App\Http\Controllers\Connectors\DropboxController;
+use App\Http\Controllers\Connectors\GoogleDriveController;
+use App\Http\Controllers\Connectors\SlackController;
 use App\Http\Controllers\CostTrackingController;
 use App\Http\Controllers\BillingController;
 use App\Http\Controllers\SubscriptionController;
@@ -102,14 +104,15 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('connectors/{connectorId}/job-status', [ConnectorController::class, 'getJobStatus']);
 
     // Google Drive OAuth
-    Route::get('connectors/google-drive/auth-url', [ConnectorController::class, 'getGoogleDriveAuthUrl']);
+    Route::get('connectors/google-drive/auth-url', [GoogleDriveController::class, 'getAuthUrl']);
     
     // Dropbox Integration
     Route::get('connectors/dropbox/auth-url', [DropboxController::class, 'authUrl']);
     Route::post('connectors/dropbox/{id}/disconnect', [DropboxController::class, 'disconnect']);
     
     // Slack Integration
-    Route::get('connectors/slack/auth-url', [ConnectorController::class, 'getSlackAuthUrl']);
+    Route::get('connectors/slack/auth-url', [SlackController::class, 'getAuthUrl']);
+    Route::post('connectors/slack/{id}/disconnect', [SlackController::class, 'disconnect']);
 
     // Documents
     Route::get('documents', [DocumentController::class, 'index']);
