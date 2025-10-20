@@ -13,6 +13,7 @@ use App\Http\Controllers\Connectors\DropboxController;
 use App\Http\Controllers\Connectors\GoogleDriveController;
 use App\Http\Controllers\Connectors\SlackController;
 use App\Http\Controllers\Connectors\ManualUploadController;
+use App\Http\Controllers\Connectors\NotionController;
 use App\Http\Controllers\CostTrackingController;
 use App\Http\Controllers\BillingController;
 use App\Http\Controllers\SubscriptionController;
@@ -119,6 +120,9 @@ Route::middleware('auth:sanctum')->group(function () {
     // Slack Integration
     Route::get('connectors/slack/auth-url', [SlackController::class, 'getAuthUrl']);
     Route::post('connectors/slack/{id}/disconnect', [SlackController::class, 'disconnect']);
+    
+    // Notion Integration
+    Route::get('connectors/notion/auth-url', [NotionController::class, 'authUrl']);
     
     // Manual Upload Integration
     Route::post('connectors/manual-upload/create', [ManualUploadController::class, 'createConnector']);
