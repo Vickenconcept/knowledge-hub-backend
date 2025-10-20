@@ -254,11 +254,53 @@ class IngestConnectorJob implements ShouldQueue
                     $text = $extractor->extractText($source, $document->mime_type, $document->title);
                 }
 
-                // Create chunks and embed via existing pipeline
-                CreateChunksJob::dispatch($document->id, $this->orgId, $text);
+                if (empty(trim($text))) {
+                    Log::info("⚠️ No text extracted from: " . $document->title);
+                    $processedFiles++;
+                    continue;
+                }
+
+                // Create chunks inline (same as Google Drive)
+                $textChunks = $extractor->chunkText($text);
+                Log::info("Text chunked for manual upload", [
+                    'document' => $document->title,
+                    'chunk_count' => count($textChunks)
+                ]);
+
+                $createdChunks = [];
+                foreach ($textChunks as $index => $chunkText) {
+                    $chunk = \App\Models\Chunk::create([
+                        'id' => (string) \Illuminate\Support\Str::uuid(),
+                        'org_id' => $this->orgId,
+                        'document_id' => $document->id,
+                        'chunk_index' => $index,
+                        'text' => $chunkText,
+                        'char_start' => $index * 2000,
+                        'char_end' => ($index + 1) * 2000,
+                        'token_count' => str_word_count($chunkText),
+                    ]);
+                    $createdChunks[] = $chunk;
+                    $chunks++;
+                }
+
+                // Generate embeddings inline (same as Google Drive)
+                if (!empty($createdChunks)) {
+                    Log::info("Generating embeddings for manual upload chunks", ['chunk_count' => count($createdChunks)]);
+                    $this->generateAndUploadEmbeddings($createdChunks, $job);
+                }
 
                 $docs++;
                 $processedFiles++;
+
+                // Update job progress
+                $job->stats = array_merge($job->stats, [
+                    'docs' => $docs,
+                    'chunks' => $chunks,
+                    'errors' => $errors,
+                    'processed_files' => $processedFiles,
+                    'current_file' => $document->title,
+                ]);
+                $job->save();
             } catch (\Throwable $e) {
                 Log::error('Manual upload processing error: ' . $e->getMessage(), [
                     'document_id' => $document->id,
