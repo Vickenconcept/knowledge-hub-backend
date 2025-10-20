@@ -121,6 +121,16 @@ class IngestConnectorJob implements ShouldQueue
                     'chunks' => $chunks,
                     'errors' => $errors,
                 ]);
+            } elseif ($connector->type === 'manual_upload') {
+                Log::info('Starting Manual Upload processing...');
+                $this->processManualUploadFiles($connector, $job, $docs, $chunks, $errors, $processedFiles, $skippedFiles);
+                Log::info('Manual Upload processing completed', [
+                    'docs' => $docs,
+                    'chunks' => $chunks,
+                    'errors' => $errors,
+                    'processed' => $processedFiles,
+                    'skipped' => $skippedFiles,
+                ]);
             }
             // TODO: Add other connector types here (e.g., Notion)
 
@@ -183,6 +193,79 @@ class IngestConnectorJob implements ShouldQueue
             'total_errors' => $errors,
             'last_synced_at' => $connector->last_synced_at
         ]);
+    }
+
+    private function processManualUploadFiles($connector, $job, &$docs, &$chunks, &$errors, &$processedFiles, &$skippedFiles)
+    {
+        $extractor = new \App\Services\DocumentExtractionService();
+        $uploader = new \App\Services\FileUploadService();
+
+        // Fetch documents created by this connector since last sync
+        $query = \App\Models\Document::where('org_id', $this->orgId)
+            ->where('connector_id', $connector->id)
+            ->orderBy('created_at');
+
+        $documents = $query->get();
+        $totalFiles = $documents->count();
+
+        $job->stats = array_merge($job->stats, [
+            'total_files' => $totalFiles,
+            'processed_files' => 0,
+            'skipped_files' => 0,
+        ]);
+        $job->save();
+
+        foreach ($documents as $index => $document) {
+            // Allow cancel mid-run
+            $job->refresh();
+            if ($job->status === 'cancelled') {
+                return;
+            }
+
+            // Quota check per file
+            $quotaCheck = \App\Services\UsageLimitService::canAddDocument($this->orgId);
+            if (!$quotaCheck['allowed']) {
+                $job->stats = array_merge($job->stats, [
+                    'quota_reached' => true,
+                ]);
+                $job->save();
+                break;
+            }
+
+            try {
+                $job->stats = array_merge($job->stats, [
+                    'current_file' => $document->title,
+                    'processed_files' => $processedFiles,
+                ]);
+                $job->save();
+
+                // Prefer local temp path from metadata, fallback to s3_path
+                $metadata = $document->metadata ?? [];
+                $tmpPath = $metadata['tmp_path'] ?? null;
+                
+                if ($tmpPath && file_exists($tmpPath)) {
+                    // Use local file for reliable extraction
+                    $text = $extractor->extractText($tmpPath, $document->mime_type, $document->title);
+                    // Clean up temp file after extraction
+                    @unlink($tmpPath);
+                } else {
+                    // Fallback to cloud URL (though may not work for DOCX)
+                    $source = $document->s3_path ?: $document->source_url;
+                    $text = $extractor->extractText($source, $document->mime_type, $document->title);
+                }
+
+                // Create chunks and embed via existing pipeline
+                CreateChunksJob::dispatch($document->id, $this->orgId, $text);
+
+                $docs++;
+                $processedFiles++;
+            } catch (\Throwable $e) {
+                Log::error('Manual upload processing error: ' . $e->getMessage(), [
+                    'document_id' => $document->id,
+                ]);
+                $errors++;
+            }
+        }
     }
 
     private function processGoogleDriveFiles($connector, $tokens, $job, &$docs, &$chunks, &$errors, &$processedFiles, &$skippedFiles)
@@ -1923,7 +2006,8 @@ class IngestConnectorJob implements ShouldQueue
                 Log::warning('🛑 Document quota reached, skipping remaining Slack files', [
                     'quota_used' => $quotaCheck['current_usage'],
                     'quota_limit' => $quotaCheck['limit'],
-                    'skipped_files' => count($files) - $slackFileDocsProcessed,
+                    // Do not compute skipped count with undefined variable; just report remaining
+                    'remaining_files' => count($files),
                 ]);
                 break; // Stop processing more files
             }

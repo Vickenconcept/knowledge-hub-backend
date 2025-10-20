@@ -10,6 +10,11 @@ class DocumentExtractionService
     public function extractText($content, $mimeType, $filename = null)
     {
         try {
+            // Allow passing either raw bytes or a filesystem path
+            if (is_string($content) && file_exists($content)) {
+                $content = @file_get_contents($content) ?: '';
+            }
+
             return match (true) {
                 str_contains($mimeType, 'text/plain') => $this->extractPlainText($content),
                 str_contains($mimeType, 'text/html') => $this->extractHtmlText($content),
