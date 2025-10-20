@@ -35,7 +35,16 @@ class ConnectorController extends Controller
             ->update(['status' => 'failed']);
         
         $connectors = Connector::where('org_id', $orgId)
-            ->withCount(['documents', 'chunks'])
+            ->withCount([
+                'documents' => function($query) {
+                    // Exclude system guide documents from count
+                    $query->where(function($q) {
+                        $q->where('doc_type', '!=', 'guide')
+                          ->orWhereNull('doc_type');
+                    });
+                },
+                'chunks'
+            ])
             ->get();
         
         // Rename count fields to match frontend expectations and check for running jobs

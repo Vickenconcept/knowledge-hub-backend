@@ -121,6 +121,16 @@ class IngestConnectorJob implements ShouldQueue
                     'chunks' => $chunks,
                     'errors' => $errors,
                 ]);
+            } elseif ($connector->type === 'manual_upload') {
+                Log::info('Starting Manual Upload processing...');
+                $this->processManualUploadFiles($connector, $job, $docs, $chunks, $errors, $processedFiles, $skippedFiles);
+                Log::info('Manual Upload processing completed', [
+                    'docs' => $docs,
+                    'chunks' => $chunks,
+                    'errors' => $errors,
+                    'processed' => $processedFiles,
+                    'skipped' => $skippedFiles,
+                ]);
             }
             // TODO: Add other connector types here (e.g., Notion)
 
@@ -183,6 +193,121 @@ class IngestConnectorJob implements ShouldQueue
             'total_errors' => $errors,
             'last_synced_at' => $connector->last_synced_at
         ]);
+    }
+
+    private function processManualUploadFiles($connector, $job, &$docs, &$chunks, &$errors, &$processedFiles, &$skippedFiles)
+    {
+        $extractor = new \App\Services\DocumentExtractionService();
+        $uploader = new \App\Services\FileUploadService();
+
+        // Fetch documents created by this connector since last sync
+        $query = \App\Models\Document::where('org_id', $this->orgId)
+            ->where('connector_id', $connector->id)
+            ->orderBy('created_at');
+
+        $documents = $query->get();
+        $totalFiles = $documents->count();
+
+        $job->stats = array_merge($job->stats, [
+            'total_files' => $totalFiles,
+            'processed_files' => 0,
+            'skipped_files' => 0,
+        ]);
+        $job->save();
+
+        foreach ($documents as $index => $document) {
+            // Allow cancel mid-run
+            $job->refresh();
+            if ($job->status === 'cancelled') {
+                return;
+            }
+
+            // Quota check per file
+            $quotaCheck = \App\Services\UsageLimitService::canAddDocument($this->orgId);
+            if (!$quotaCheck['allowed']) {
+                $job->stats = array_merge($job->stats, [
+                    'quota_reached' => true,
+                ]);
+                $job->save();
+                break;
+            }
+
+            try {
+                $job->stats = array_merge($job->stats, [
+                    'current_file' => $document->title,
+                    'processed_files' => $processedFiles,
+                ]);
+                $job->save();
+
+                // Prefer local temp path from metadata, fallback to s3_path
+                $metadata = $document->metadata ?? [];
+                $tmpPath = $metadata['tmp_path'] ?? null;
+                
+                if ($tmpPath && file_exists($tmpPath)) {
+                    // Use local file for reliable extraction
+                    $text = $extractor->extractText($tmpPath, $document->mime_type, $document->title);
+                    // Clean up temp file after extraction
+                    @unlink($tmpPath);
+                } else {
+                    // Fallback to cloud URL (though may not work for DOCX)
+                    $source = $document->s3_path ?: $document->source_url;
+                    $text = $extractor->extractText($source, $document->mime_type, $document->title);
+                }
+
+                if (empty(trim($text))) {
+                    Log::info("⚠️ No text extracted from: " . $document->title);
+                    $processedFiles++;
+                    continue;
+                }
+
+                // Create chunks inline (same as Google Drive)
+                $textChunks = $extractor->chunkText($text);
+                Log::info("Text chunked for manual upload", [
+                    'document' => $document->title,
+                    'chunk_count' => count($textChunks)
+                ]);
+
+                $createdChunks = [];
+                foreach ($textChunks as $index => $chunkText) {
+                    $chunk = \App\Models\Chunk::create([
+                        'id' => (string) \Illuminate\Support\Str::uuid(),
+                        'org_id' => $this->orgId,
+                        'document_id' => $document->id,
+                        'chunk_index' => $index,
+                        'text' => $chunkText,
+                        'char_start' => $index * 2000,
+                        'char_end' => ($index + 1) * 2000,
+                        'token_count' => str_word_count($chunkText),
+                    ]);
+                    $createdChunks[] = $chunk;
+                    $chunks++;
+                }
+
+                // Generate embeddings inline (same as Google Drive)
+                if (!empty($createdChunks)) {
+                    Log::info("Generating embeddings for manual upload chunks", ['chunk_count' => count($createdChunks)]);
+                    $this->generateAndUploadEmbeddings($createdChunks, $job);
+                }
+
+                $docs++;
+                $processedFiles++;
+
+                // Update job progress
+                $job->stats = array_merge($job->stats, [
+                    'docs' => $docs,
+                    'chunks' => $chunks,
+                    'errors' => $errors,
+                    'processed_files' => $processedFiles,
+                    'current_file' => $document->title,
+                ]);
+                $job->save();
+            } catch (\Throwable $e) {
+                Log::error('Manual upload processing error: ' . $e->getMessage(), [
+                    'document_id' => $document->id,
+                ]);
+                $errors++;
+            }
+        }
     }
 
     private function processGoogleDriveFiles($connector, $tokens, $job, &$docs, &$chunks, &$errors, &$processedFiles, &$skippedFiles)
@@ -1923,7 +2048,8 @@ class IngestConnectorJob implements ShouldQueue
                 Log::warning('🛑 Document quota reached, skipping remaining Slack files', [
                     'quota_used' => $quotaCheck['current_usage'],
                     'quota_limit' => $quotaCheck['limit'],
-                    'skipped_files' => count($files) - $slackFileDocsProcessed,
+                    // Do not compute skipped count with undefined variable; just report remaining
+                    'remaining_files' => count($files),
                 ]);
                 break; // Stop processing more files
             }

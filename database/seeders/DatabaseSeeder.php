@@ -17,6 +17,7 @@ class DatabaseSeeder extends Seeder
             // TestUserSeeder::class,
             PricingTiersSeeder::class,
             // DefaultDocumentSeeder::class,
+            
             // ConnectorSeeder::class,
         ]);
     }

@@ -98,9 +98,18 @@ class DocumentController extends Controller
             return response()->json(['error' => 'Document not found'], 404);
         }
         $chunks = Chunk::where('document_id', $doc->id)
+            ->select('id', 'document_id', 'org_id', 'chunk_index', 'text', 'char_start', 'char_end', 'token_count', 'created_at', 'updated_at')
             ->orderBy('chunk_index')
             ->paginate(50);
-        return response()->json($chunks);
+        
+        // Format pagination response properly (excluding embedding binary data)
+        return response()->json([
+            'data' => $chunks->items(),
+            'total' => $chunks->total(),
+            'current_page' => $chunks->currentPage(),
+            'per_page' => $chunks->perPage(),
+            'last_page' => $chunks->lastPage(),
+        ]);
     }
 
     public function destroy(Request $request, string $id, VectorStoreService $vector)

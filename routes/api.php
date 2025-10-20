@@ -12,6 +12,7 @@ use App\Http\Controllers\IngestJobController;
 use App\Http\Controllers\Connectors\DropboxController;
 use App\Http\Controllers\Connectors\GoogleDriveController;
 use App\Http\Controllers\Connectors\SlackController;
+use App\Http\Controllers\Connectors\ManualUploadController;
 use App\Http\Controllers\CostTrackingController;
 use App\Http\Controllers\BillingController;
 use App\Http\Controllers\SubscriptionController;
@@ -118,6 +119,12 @@ Route::middleware('auth:sanctum')->group(function () {
     // Slack Integration
     Route::get('connectors/slack/auth-url', [SlackController::class, 'getAuthUrl']);
     Route::post('connectors/slack/{id}/disconnect', [SlackController::class, 'disconnect']);
+    
+    // Manual Upload Integration
+    Route::post('connectors/manual-upload/create', [ManualUploadController::class, 'createConnector']);
+    Route::post('connectors/manual-upload/upload', [ManualUploadController::class, 'uploadFiles']);
+    Route::get('connectors/manual-upload/history', [ManualUploadController::class, 'getUploadHistory']);
+    Route::delete('connectors/manual-upload/{documentId}', [ManualUploadController::class, 'deleteUpload']);
 
     // Documents
     Route::get('documents', [DocumentController::class, 'index']);
