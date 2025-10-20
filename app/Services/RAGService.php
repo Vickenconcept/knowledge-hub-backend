@@ -25,31 +25,23 @@ class RAGService
         ?array $lastAnswer = null
     ): string
     {
-        $maxSnip = 15; // Increased from 6 to 15 for more comprehensive context
+        $maxSnip = 8; // Reduced from 15 to 8 for faster response times (balance: quality vs speed)
         
         // Detect query intent for context-aware responses
         $intentService = new \App\Services\QueryIntentService();
         $intent = $intentService->detectIntent($query);
         
-        // Check if this is a conversational greeting or casual question
-        $greetings = ['hello', 'hi', 'hey', 'good morning', 'good afternoon', 'good evening'];
-        $isGreeting = false;
-        foreach ($greetings as $greeting) {
-            if (stripos($query, $greeting) !== false && strlen($query) < 50) {
-                $isGreeting = true;
-                break;
-            }
-        }
-
-        if ($isGreeting || empty($snippets)) {
-            // For greetings or when no context is found, be conversational
+        // Check if there are no relevant documents found
+        if (empty($snippets)) {
+            // No context found - provide a helpful fallback response
             $buf = "You are a friendly AI assistant for a team's knowledge hub. ";
-            $buf .= "The user just said: \"{$query}\"\n\n";
+            $buf .= "The user asked: \"{$query}\"\n\n";
             $buf .= "INSTRUCTIONS:\n";
-            $buf .= "- If it's a greeting (hello, hi, etc.), respond warmly and briefly explain what you can help with.\n";
-            $buf .= "- If it's a casual question not requiring document search, answer conversationally.\n";
+            $buf .= "- No relevant documents were found in the knowledge base for this query.\n";
+            $buf .= "- Provide a helpful response explaining that you couldn't find information about their query.\n";
+            $buf .= "- Suggest they try connecting more data sources or rephrasing their question.\n";
             $buf .= "- Keep it friendly and concise (2-3 sentences).\n";
-            $buf .= "- Return STRICT JSON with keys: answer (string), sources (array - can be empty for greetings).\n";
+            $buf .= "- Return STRICT JSON with keys: answer (string), sources (array - empty).\n";
             return $buf;
         }
 
@@ -64,7 +56,8 @@ class RAGService
             $title = $s['document_id'] ?? 'unknown_doc';
             $docType = $s['doc_type'] ?? 'general';
             $documentTypes[] = $docType;
-            $excerpt = mb_substr($s['text'] ?? '', 0, 1200);
+            // Reduced excerpt size from 1200 to 800 chars for faster processing
+            $excerpt = mb_substr($s['text'] ?? '', 0, 800);
             $buf .= "[{$count}] Document: {$title} (Type: {$docType})\n";
             $buf .= "Content: \"{$excerpt}\"\n";
             $buf .= "Location: chars " . ($s['char_start'] ?? 0) . "-" . ($s['char_end'] ?? 0) . "\n\n";
@@ -80,9 +73,9 @@ class RAGService
         $confidenceAnalysis = $confidenceService->analyzeSnippets($snippets);
         $confidenceSummary = $confidenceService->getConfidenceSummary($confidenceAnalysis);
         
-        // Add conversation context if available
+        // Add conversation context if available (reduced from 5 to 3 for speed)
         if (!empty($conversationContext)) {
-            $buf .= \App\Services\ConversationMemoryService::formatConversationForPrompt($conversationContext, 5);
+            $buf .= \App\Services\ConversationMemoryService::formatConversationForPrompt($conversationContext, 3);
         }
         
         // For refinement queries, highlight the previous answer
@@ -148,8 +141,9 @@ class RAGService
                 ['role' => 'user', 'content' => $prompt],
             ],
             'max_tokens' => $maxTokens, // Dynamic based on response style
-            'temperature' => 0.1, // Slightly increased from 0.0 for more natural language
+            'temperature' => 0.2, // Balanced for natural language and speed
             'response_format' => ['type' => 'json_object'],
+            'top_p' => 0.9, // Nucleus sampling for faster generation
         ];
 
         $resp = Http::withToken($this->openAiKey)

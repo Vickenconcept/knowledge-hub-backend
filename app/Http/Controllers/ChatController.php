@@ -56,7 +56,7 @@ class ChatController extends Controller
         ]);
 
         $queryText = $validated['query'];
-        $topK = $validated['top_k'] ?? 15; // Increased from 6 to 15 for more comprehensive results
+        $topK = $validated['top_k'] ?? 10; // Reduced from 15 to 10 for faster responses (balance: quality vs speed)
         $conversationId = $validated['conversation_id'] ?? null;
         $requestedConnectorIds = $validated['connector_ids'] ?? null;
         

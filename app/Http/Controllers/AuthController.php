@@ -60,8 +60,8 @@ class AuthController extends Controller
             $organization->owner_id = $user->id;
             $organization->save();
             
-            // Create getting started guide for new organization
-            \App\Services\OnboardingService::createGettingStartedGuide($organization);
+            // Create getting started guide in background (non-blocking)
+            \App\Jobs\CreateGettingStartedGuideJob::dispatch($organization->id);
             
             Log::info('User set as organization owner', [
                 'user_id' => $user->id,

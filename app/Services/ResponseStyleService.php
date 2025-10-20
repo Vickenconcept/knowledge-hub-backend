@@ -15,42 +15,42 @@ class ResponseStyleService
                 'description' => 'Detailed, thorough answers with full context (8-15 sentences)',
                 'detail_level' => 'high',
                 'structure' => 'paragraph',
-                'max_tokens' => 1500,
+                'max_tokens' => 1000, // Reduced from 1500 for faster generation
             ],
             'structured_profile' => [
                 'name' => 'Structured Profile',
                 'description' => 'Organized by sections: Skills, Experience, Education, etc.',
                 'detail_level' => 'high',
                 'structure' => 'sectioned',
-                'max_tokens' => 1500,
+                'max_tokens' => 1000, // Reduced from 1500 for faster generation
             ],
             'summary_report' => [
                 'name' => 'Summary Report',
                 'description' => 'Concise summaries with key insights (4-6 sentences)',
                 'detail_level' => 'medium',
                 'structure' => 'paragraph',
-                'max_tokens' => 800,
+                'max_tokens' => 600, // Reduced from 800 for faster generation
             ],
             'qa_friendly' => [
                 'name' => 'Q&A Friendly',
                 'description' => 'Direct, conversational answers (2-4 sentences)',
                 'detail_level' => 'medium',
                 'structure' => 'conversational',
-                'max_tokens' => 500,
+                'max_tokens' => 350, // Reduced from 500 for faster generation
             ],
             'bullet_brief' => [
                 'name' => 'Bullet Points',
                 'description' => 'Concise bullet-point lists',
                 'detail_level' => 'low',
                 'structure' => 'bullets',
-                'max_tokens' => 600,
+                'max_tokens' => 450, // Reduced from 600 for faster generation
             ],
             'executive_summary' => [
                 'name' => 'Executive Summary',
                 'description' => 'High-level overview for decision makers',
                 'detail_level' => 'medium',
                 'structure' => 'executive',
-                'max_tokens' => 700,
+                'max_tokens' => 550, // Reduced from 700 for faster generation
             ],
         ];
     }
