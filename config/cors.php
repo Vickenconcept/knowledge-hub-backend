@@ -13,6 +13,7 @@ return [
         'http://127.0.0.1:3000',
         'http://localhost:5173',
         'http://127.0.0.1:5173',
+        'https://knowledge-hub-frontend.vercel.app',
     ],
 
     'allowed_origins_patterns' => ['/localhost:\d+/'],
