@@ -111,6 +111,43 @@ class DropboxController extends BaseConnectorController
 
             $tokenData = $response->json();
 
+            // Get account info to extract display name
+            $accountInfo = null;
+            $accountName = 'Dropbox';
+            
+            try {
+                $accountResponse = Http::withHeaders([
+                    'Authorization' => 'Bearer ' . $tokenData['access_token'],
+                    'Content-Type' => 'application/json',
+                ])
+                ->timeout(10)
+                ->withBody('null', 'application/json')
+                ->post('https://api.dropboxapi.com/2/users/get_current_account');
+                
+                if ($accountResponse->successful()) {
+                    $accountInfo = $accountResponse->json();
+                    $accountName = $accountInfo['name']['display_name'] ?? 
+                                   $accountInfo['name']['familiar_name'] ?? 
+                                   $accountInfo['email'] ?? 
+                                   'Dropbox';
+                    
+                    Log::info('Dropbox account info retrieved', [
+                        'account_name' => $accountName,
+                        'email' => $accountInfo['email'] ?? null,
+                        'account_info' => $accountInfo,
+                    ]);
+                } else {
+                    Log::warning('Dropbox account info request failed', [
+                        'status' => $accountResponse->status(),
+                        'body' => $accountResponse->body(),
+                    ]);
+                }
+            } catch (\Exception $e) {
+                Log::warning('Failed to get Dropbox account info, using default label', [
+                    'error' => $e->getMessage()
+                ]);
+            }
+
             // Check if connector already exists
             $connector = Connector::where('org_id', $orgId)
                 ->where('type', 'dropbox')
@@ -121,9 +158,12 @@ class DropboxController extends BaseConnectorController
                 $connector->update([
                     'encrypted_tokens' => encrypt(json_encode($tokenData)),
                     'status' => 'connected',
-                    'label' => 'Dropbox',
+                    'label' => $accountName,
                     'metadata' => json_encode([
                         'connected_at' => now()->toIso8601String(),
+                        'account_id' => $accountInfo['account_id'] ?? null,
+                        'email' => $accountInfo['email'] ?? null,
+                        'display_name' => $accountName,
                     ]),
                 ]);
             } else {
@@ -132,11 +172,14 @@ class DropboxController extends BaseConnectorController
                     'id' => (string) Str::uuid(),
                     'org_id' => $orgId,
                     'type' => 'dropbox',
-                    'label' => 'Dropbox',
+                    'label' => $accountName,
                     'status' => 'connected',
                     'encrypted_tokens' => encrypt(json_encode($tokenData)),
                     'metadata' => json_encode([
                         'connected_at' => now()->toIso8601String(),
+                        'account_id' => $accountInfo['account_id'] ?? null,
+                        'email' => $accountInfo['email'] ?? null,
+                        'display_name' => $accountName,
                     ]),
                 ]);
             }

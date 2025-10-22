@@ -56,7 +56,7 @@ class ChatController extends Controller
         ]);
 
         $queryText = $validated['query'];
-        $topK = $validated['top_k'] ?? 15; // Increased from 6 to 15 for more comprehensive results
+        $topK = $validated['top_k'] ?? 10; // Reduced from 15 to 10 for faster responses (balance: quality vs speed)
         $conversationId = $validated['conversation_id'] ?? null;
         $requestedConnectorIds = $validated['connector_ids'] ?? null;
         
@@ -315,14 +315,33 @@ class ChatController extends Controller
             
             $llmResponse = $rag->callLLM($prompt, $maxTokens, $orgId, $user->id, $conversation->id, $queryText);
 
-            // Parse the LLM response (it returns JSON with answer + sources)
-            $parsedAnswer = json_decode($llmResponse['answer'] ?? '{}', true);
-            $answerText = is_array($parsedAnswer) ? ($parsedAnswer['answer'] ?? $llmResponse['answer']) : $llmResponse['answer'];
-            
+            // Parse and normalize the LLM response into a strict contract
+            $rawAnswer = $llmResponse['answer'] ?? '';
+            $answerText = is_string($rawAnswer) ? $rawAnswer : '';
+            $llmSources = [];
+
+            // Case 1: answer is a JSON string { answer, sources }
+            if (is_string($answerText)) {
+                $trimmed = ltrim($answerText);
+                if (strlen($trimmed) > 0 && $trimmed[0] === '{') {
+                    $decoded = json_decode($answerText, true);
+                    if (is_array($decoded)) {
+                        $answerText = (string) ($decoded['answer'] ?? $answerText);
+                        $llmSources = $decoded['sources'] ?? [];
+                    }
+                }
+            }
+
+            // Case 2: answer already came as array/object
+            if (is_array($rawAnswer)) {
+                $answerText = (string) ($rawAnswer['answer'] ?? '');
+                $llmSources = $rawAnswer['sources'] ?? $llmSources;
+            }
+
             // Convert literal \n to actual newlines for better formatting
-            $answerText = str_replace(['\\n', '\n'], "\n", $answerText);
-            
-            $llmSources = is_array($parsedAnswer) ? ($parsedAnswer['sources'] ?? []) : [];
+            if (is_string($answerText)) {
+                $answerText = str_replace(['\\n', '\n'], "\n", $answerText);
+            }
 
             // 5. Format sources with full details (title, URL, excerpt, type)
             // Group by document to avoid duplicate sources
@@ -534,23 +553,37 @@ class ChatController extends Controller
     {
         $user = $request->user();
         
+        $perPage = min($request->get('per_page', 20), 100); // Max 100 per page
+        $page = max($request->get('page', 1), 1);
+        
         $conversations = Conversation::where('user_id', $user->id)
             ->orderBy('last_message_at', 'desc')
             ->with(['messages' => function($q) {
                 $q->orderBy('created_at', 'desc')->limit(1);
             }])
-            ->get();
+            ->paginate($perPage, ['*'], 'page', $page);
 
-        return response()->json($conversations->map(function($conv) {
-            $lastMessage = $conv->messages->first();
-            return [
-                'id' => $conv->id,
-                'title' => $conv->title,
-                'last_message' => $lastMessage ? $lastMessage->content : null,
-                'last_message_at' => $conv->last_message_at,
-                'created_at' => $conv->created_at,
-            ];
-        }));
+        return response()->json([
+            'success' => true,
+            'data' => $conversations->map(function($conv) {
+                $lastMessage = $conv->messages->first();
+                return [
+                    'id' => $conv->id,
+                    'title' => $conv->title,
+                    'last_message' => $lastMessage ? $lastMessage->content : null,
+                    'last_message_at' => $conv->last_message_at,
+                    'created_at' => $conv->created_at,
+                ];
+            }),
+            'pagination' => [
+                'current_page' => $conversations->currentPage(),
+                'last_page' => $conversations->lastPage(),
+                'per_page' => $conversations->perPage(),
+                'total' => $conversations->total(),
+                'from' => $conversations->firstItem(),
+                'to' => $conversations->lastItem(),
+            ]
+        ]);
     }
 
     public function getConversation(Request $request, $id)

@@ -7,6 +7,17 @@ use Illuminate\Support\Str;
 
 class DocumentExtractionService
 {
+    // File size limits by type (in bytes)
+    private const SIZE_LIMITS = [
+        'application/pdf' => 50 * 1024 * 1024,      // 50MB
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document' => 25 * 1024 * 1024, // 25MB
+        'application/msword' => 10 * 1024 * 1024,   // 10MB
+        'text/plain' => 10 * 1024 * 1024,           // 10MB
+        'text/html' => 10 * 1024 * 1024,            // 10MB
+        'text/csv' => 5 * 1024 * 1024,              // 5MB
+        'default' => 5 * 1024 * 1024,               // 5MB default
+    ];
+
     public function extractText($content, $mimeType, $filename = null)
     {
         try {
@@ -15,25 +26,166 @@ class DocumentExtractionService
                 $content = @file_get_contents($content) ?: '';
             }
 
-            return match (true) {
-                str_contains($mimeType, 'text/plain') => $this->extractPlainText($content),
-                str_contains($mimeType, 'text/html') => $this->extractHtmlText($content),
-                str_contains($mimeType, 'text/csv') => $this->extractCsvText($content),
-                str_contains($mimeType, 'application/pdf') => $this->extractPdfText($content),
-                str_contains($mimeType, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') => $this->extractDocxText($content),
-                str_contains($mimeType, 'application/msword') => $this->extractDocText($content),
-                str_contains($mimeType, 'application/vnd.google-apps.') => $content, // Already extracted as text
+            // Validate content size
+            $contentSize = strlen($content);
+            $maxSize = $this->getSizeLimit($mimeType);
+            
+            if ($contentSize > $maxSize) {
+                throw new \Exception("File too large: {$contentSize} bytes (max: {$maxSize} bytes)");
+            }
+
+            // Detect MIME type using finfo if not provided or unreliable
+            $detectedMimeType = $this->detectMimeType($content, $filename, $mimeType);
+            
+            // Check if it's a DOCX file based on filename or content signature
+            $isDocx = $this->isDocxFile($content, $filename);
+
+            $result = match (true) {
+                str_contains($detectedMimeType, 'text/plain') => $this->extractPlainText($content),
+                str_contains($detectedMimeType, 'text/html') => $this->extractHtmlText($content),
+                str_contains($detectedMimeType, 'text/csv') => $this->extractCsvText($content),
+                str_contains($detectedMimeType, 'application/pdf') => $this->extractPdfText($content),
+                str_contains($detectedMimeType, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') => $this->extractDocxText($content),
+                str_contains($detectedMimeType, 'application/msword') => $this->extractDocText($content),
+                str_contains($detectedMimeType, 'application/vnd.google-apps.') => $this->sanitizeText($content), // Already extracted as text but sanitize it
+                // Handle DOCX files misdetected as application/zip
+                str_contains($detectedMimeType, 'application/zip') && $isDocx => $this->extractDocxText($content),
                 default => $this->extractPlainText($content)
             };
+
+            Log::info("Text extraction completed", [
+                'filename' => $filename,
+                'original_mime' => $mimeType,
+                'detected_mime' => $detectedMimeType,
+                'content_size' => $contentSize,
+                'extracted_length' => strlen($result)
+            ]);
+
+            return $result;
+
         } catch (\Exception $e) {
-            Log::error("Error extracting text from {$filename} (type: {$mimeType}): " . $e->getMessage());
-            return "Error extracting text from this file: " . $e->getMessage();
+            Log::error("Error extracting text from {$filename} (type: {$mimeType}): " . $e->getMessage(), [
+                'content_size' => strlen($content),
+                'trace' => $e->getTraceAsString()
+            ]);
+            
+            // Return structured error instead of raw exception message
+            return $this->createErrorText($e, $filename, $mimeType);
         }
+    }
+
+    /**
+     * Detect MIME type using finfo
+     */
+    private function detectMimeType(string $content, ?string $filename, ?string $providedMimeType): string
+    {
+        // If we have a reliable MIME type, use it
+        if ($providedMimeType && !in_array($providedMimeType, ['application/octet-stream', 'application/zip'])) {
+            return $providedMimeType;
+        }
+
+        // Use finfo to detect MIME type from content
+        $finfo = finfo_open(FILEINFO_MIME_TYPE);
+        if ($finfo === false) {
+            Log::warning("Failed to open finfo, using provided MIME type", ['mime' => $providedMimeType]);
+            return $providedMimeType ?? 'application/octet-stream';
+        }
+
+        $detectedMime = finfo_buffer($finfo, $content);
+        finfo_close($finfo);
+
+        if ($detectedMime === false || $detectedMime === 'application/octet-stream') {
+            // Fallback to filename extension
+            if ($filename) {
+                $extension = strtolower(pathinfo($filename, PATHINFO_EXTENSION));
+                $extensionMimeMap = [
+                    'pdf' => 'application/pdf',
+                    'docx' => 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                    'doc' => 'application/msword',
+                    'txt' => 'text/plain',
+                    'html' => 'text/html',
+                    'htm' => 'text/html',
+                    'csv' => 'text/csv',
+                ];
+                
+                if (isset($extensionMimeMap[$extension])) {
+                    $detectedMime = $extensionMimeMap[$extension];
+                }
+            }
+        }
+
+        Log::info("MIME type detection", [
+            'provided' => $providedMimeType,
+            'detected' => $detectedMime,
+            'filename' => $filename
+        ]);
+
+        return $detectedMime ?: ($providedMimeType ?? 'application/octet-stream');
+    }
+
+    /**
+     * Check if content is a DOCX file
+     */
+    private function isDocxFile(string $content, ?string $filename): bool
+    {
+        // Check filename extension
+        if ($filename && (str_ends_with(strtolower($filename), '.docx') || str_ends_with(strtolower($filename), '.DOCX'))) {
+            return true;
+        }
+
+        // Check ZIP signature and DOCX structure
+        if (str_starts_with($content, 'PK')) {
+            try {
+                $zip = new \ZipArchive();
+                $tempFile = tempnam(sys_get_temp_dir(), 'docx_check_');
+                file_put_contents($tempFile, $content);
+                
+                if ($zip->open($tempFile) === true) {
+                    $hasDocumentXml = $zip->locateName('word/document.xml') !== false;
+                    $zip->close();
+                    unlink($tempFile);
+                    return $hasDocumentXml;
+                }
+                unlink($tempFile);
+            } catch (\Exception $e) {
+                // Ignore errors, not a DOCX
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Get size limit for MIME type
+     */
+    private function getSizeLimit(string $mimeType): int
+    {
+        return self::SIZE_LIMITS[$mimeType] ?? self::SIZE_LIMITS['default'];
+    }
+
+    /**
+     * Create sanitized error text
+     */
+    private function createErrorText(\Exception $e, ?string $filename, ?string $mimeType): string
+    {
+        $errorMessage = "Error extracting text from this file";
+        
+        if ($filename) {
+            $errorMessage .= " ({$filename})";
+        }
+        
+        if ($mimeType) {
+            $errorMessage .= " [{$mimeType}]";
+        }
+        
+        $errorMessage .= ": " . $e->getMessage();
+        
+        return $this->sanitizeText($errorMessage);
     }
 
     private function extractPlainText($content)
     {
-        return trim($content);
+        return $this->sanitizeText(trim($content));
     }
 
     private function extractHtmlText($content)
@@ -41,7 +193,7 @@ class DocumentExtractionService
         // Remove HTML tags and decode entities
         $text = strip_tags($content);
         $text = html_entity_decode($text, ENT_QUOTES, 'UTF-8');
-        return trim($text);
+        return $this->sanitizeText(trim($text));
     }
 
     private function extractCsvText($content)
@@ -56,7 +208,7 @@ class DocumentExtractionService
             }
         }
 
-                    return trim($text);
+        return $this->sanitizeText(trim($text));
                 }
 
     private function extractPdfText($content)
@@ -64,6 +216,7 @@ class DocumentExtractionService
         Log::info('Attempting PDF text extraction', ['content_length' => strlen($content)]);
 
         $tempPdfPath = null;
+        $extractionMethods = [];
 
         try {
             // Try using Spatie's pdf-to-text (best option - uses pdftotext)
@@ -86,10 +239,12 @@ class DocumentExtractionService
 
                     if (!empty(trim($text))) {
                         Log::info('PDF text extracted successfully with pdftotext', ['text_length' => strlen($text)]);
-                        // Sanitize text before returning
                         return $this->sanitizeText($text);
                     }
+                    
+                    $extractionMethods[] = 'pdftotext (empty result)';
                 } catch (\Exception $e) {
+                    $extractionMethods[] = 'pdftotext (failed: ' . $e->getMessage() . ')';
                     Log::warning('pdftotext extraction failed, trying fallback: ' . $e->getMessage());
                     // Clean up temp file if it exists
                     if ($tempPdfPath && file_exists($tempPdfPath)) {
@@ -97,6 +252,8 @@ class DocumentExtractionService
                         $tempPdfPath = null;
                     }
                 }
+            } else {
+                $extractionMethods[] = 'pdftotext (not available)';
             }
 
             // Fallback: Try Smalot PDFParser if pdftotext isn't available or failed
@@ -109,27 +266,32 @@ class DocumentExtractionService
 
                     if (!empty(trim($text))) {
                         Log::info('PDF text extracted successfully with Smalot parser', ['text_length' => strlen($text)]);
-                        // Sanitize text before returning
                         return $this->sanitizeText($text);
                     }
+                    
+                    $extractionMethods[] = 'Smalot parser (empty result)';
                 } catch (\Exception $e) {
+                    $extractionMethods[] = 'Smalot parser (failed: ' . $e->getMessage() . ')';
                     Log::warning('Smalot parser extraction failed: ' . $e->getMessage());
                 }
+            } else {
+                $extractionMethods[] = 'Smalot parser (not available)';
             }
 
-            // If all methods fail, log and return empty
-            Log::error('All PDF extraction methods failed');
-            return '';
+            // If all methods fail, log and return structured error
+            Log::error('All PDF extraction methods failed', ['methods' => $extractionMethods]);
+            return $this->createErrorText(new \Exception('PDF extraction failed: ' . implode(', ', $extractionMethods)), 'PDF', 'application/pdf');
+
         } catch (\Exception $e) {
-            Log::error('PDF extraction error: ' . $e->getMessage());
-            return '';
+            Log::error('PDF extraction error: ' . $e->getMessage(), ['trace' => $e->getTraceAsString()]);
+            return $this->createErrorText($e, 'PDF', 'application/pdf');
         } finally {
             // Final cleanup - ensure temp file is deleted if it exists
             if ($tempPdfPath && file_exists($tempPdfPath)) {
                 try {
                     unlink($tempPdfPath);
                 } catch (\Exception $e) {
-                    // Ignore cleanup errors
+                    Log::warning('Failed to cleanup temp PDF file: ' . $e->getMessage());
                 }
             }
         }
@@ -181,7 +343,7 @@ class DocumentExtractionService
                             }
                             
                             @unlink($tmpFile);
-                            $extractedText = trim($text);
+                            $extractedText = $this->sanitizeText(trim($text));
                             Log::info('DOCX text extracted with DOMDocument', ['text_length' => strlen($extractedText), 'node_count' => $textNodes->length]);
                             return $extractedText;
                         } catch (\Exception $e) {
@@ -199,7 +361,7 @@ class DocumentExtractionService
                         }
 
                         @unlink($tmpFile);
-                        $extractedText = trim($text);
+                        $extractedText = $this->sanitizeText(trim($text));
                         Log::info('DOCX text extracted successfully', ['text_length' => strlen($extractedText)]);
                         return $extractedText;
                     }
@@ -211,17 +373,17 @@ class DocumentExtractionService
             }
 
             @unlink($tmpFile);
-            return "Unable to extract DOCX content. File size: " . strlen($content) . " bytes";
+            return $this->sanitizeText("Unable to extract DOCX content. File size: " . strlen($content) . " bytes");
         } catch (\Exception $e) {
             Log::error("DOCX extraction exception: " . $e->getMessage(), ['trace' => $e->getTraceAsString()]);
-            return "DOCX extraction error: " . $e->getMessage();
+            return $this->sanitizeText("DOCX extraction error: " . $e->getMessage());
         }
     }
 
     private function extractDocText($content)
     {
         // For DOC extraction, you would need a specialized library
-        return "DOC content extraction not implemented yet. File size: " . strlen($content) . " bytes";
+        return $this->sanitizeText("DOC content extraction not implemented yet. File size: " . strlen($content) . " bytes");
     }
 
     private function sanitizeText(string $text): string

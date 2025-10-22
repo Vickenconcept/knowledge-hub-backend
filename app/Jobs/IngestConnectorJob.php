@@ -8,6 +8,7 @@ use App\Services\GoogleDriveService;
 use App\Services\DropboxService;
 use App\Services\FileUploadService;
 use App\Services\DocumentExtractionService;
+use App\Services\HttpDownloadService;
 use App\Models\Document;
 use App\Jobs\ProcessLargeFileJob;
 use Illuminate\Bus\Queueable;
@@ -131,8 +132,17 @@ class IngestConnectorJob implements ShouldQueue
                     'processed' => $processedFiles,
                     'skipped' => $skippedFiles,
                 ]);
+            } elseif ($connector->type === 'notion') {
+                Log::info('Starting Notion page ingestion...');
+                $this->processNotionPages($connector, $tokens, $job, $docs, $chunks, $errors, $processedFiles, $skippedFiles);
+                Log::info('Notion page ingestion completed', [
+                    'docs' => $docs,
+                    'chunks' => $chunks,
+                    'errors' => $errors,
+                    'processed' => $processedFiles,
+                    'skipped' => $skippedFiles,
+                ]);
             }
-            // TODO: Add other connector types here (e.g., Notion)
 
         } catch (\Throwable $e) {
             Log::error("Ingestion error: " . $e->getMessage(), [
@@ -243,16 +253,80 @@ class IngestConnectorJob implements ShouldQueue
                 $metadata = $document->metadata ?? [];
                 $tmpPath = $metadata['tmp_path'] ?? null;
                 
-                if ($tmpPath && file_exists($tmpPath)) {
+                Log::info("Processing manual upload document", [
+                    'document' => $document->title,
+                    'has_tmp_path' => !empty($tmpPath),
+                    'tmp_exists' => $tmpPath ? file_exists($tmpPath) : false,
+                    'has_s3_path' => !empty($document->s3_path),
+                    'mime_type' => $document->mime_type
+                ]);
+                
+                // Check if we already have extracted text from classification
+                $text = '';
+                if (!empty($metadata['extracted_text'])) {
+                    $text = $metadata['extracted_text'];
+                    Log::info("Using pre-extracted text from classification", [
+                        'document' => $document->title,
+                        'text_length' => strlen($text)
+                    ]);
+                } elseif ($tmpPath && file_exists($tmpPath)) {
                     // Use local file for reliable extraction
+                    Log::info("Extracting from tmp file", ['path' => $tmpPath]);
                     $text = $extractor->extractText($tmpPath, $document->mime_type, $document->title);
                     // Clean up temp file after extraction
                     @unlink($tmpPath);
                 } else {
-                    // Fallback to cloud URL (though may not work for DOCX)
+                    // Fallback to cloud URL - download it first
                     $source = $document->s3_path ?: $document->source_url;
-                    $text = $extractor->extractText($source, $document->mime_type, $document->title);
+                    
+                    Log::info("Fallback to cloud source", [
+                        'document' => $document->title,
+                        'source' => $source,
+                        'is_url' => filter_var($source, FILTER_VALIDATE_URL)
+                    ]);
+                    
+                    // If source is a URL, download it first
+                    if (filter_var($source, FILTER_VALIDATE_URL)) {
+                        try {
+                            Log::info("Downloading file from URL", ['url' => $source]);
+                            $downloadService = new HttpDownloadService();
+                            $downloadResult = $downloadService->download($source);
+                            
+                            if (!$downloadResult['success']) {
+                                Log::warning("Failed to download file from URL", [
+                                    'document' => $document->title,
+                                    'url' => $source,
+                                    'error' => $downloadResult['error']
+                                ]);
+                                $text = '';
+                            } else {
+                                Log::info("File downloaded successfully", [
+                                    'content_length' => $downloadResult['content_length'],
+                                    'content_type' => $downloadResult['content_type'],
+                                    'first_bytes' => substr($downloadResult['content'], 0, 10)
+                                ]);
+                                // Extract from downloaded content
+                                $text = $extractor->extractText($downloadResult['content'], $document->mime_type, $document->title);
+                            }
+                        } catch (\Exception $e) {
+                            Log::error("Error downloading file: " . $e->getMessage(), [
+                                'document' => $document->title,
+                                'url' => $source
+                            ]);
+                            $text = '';
+                        }
+                    } else {
+                        // It's a file path
+                        Log::info("Extracting from file path", ['path' => $source]);
+                        $text = $extractor->extractText($source, $document->mime_type, $document->title);
+                    }
                 }
+
+                Log::info("Text extraction completed", [
+                    'document' => $document->title,
+                    'text_length' => strlen($text),
+                    'text_preview' => substr($text, 0, 100)
+                ]);
 
                 if (empty(trim($text))) {
                     Log::info("⚠️ No text extracted from: " . $document->title);
@@ -264,7 +338,8 @@ class IngestConnectorJob implements ShouldQueue
                 $textChunks = $extractor->chunkText($text);
                 Log::info("Text chunked for manual upload", [
                     'document' => $document->title,
-                    'chunk_count' => count($textChunks)
+                    'chunk_count' => count($textChunks),
+                    'first_chunk_preview' => substr($textChunks[0] ?? '', 0, 100)
                 ]);
 
                 $createdChunks = [];
@@ -307,6 +382,357 @@ class IngestConnectorJob implements ShouldQueue
                 ]);
                 $errors++;
             }
+        }
+    }
+
+    private function processNotionPages($connector, $tokens, $job, &$docs, &$chunks, &$errors, &$processedFiles, &$skippedFiles)
+    {
+        Log::info('>>> processNotionPages started', [
+            'connector_id' => $connector->id,
+            'has_access_token' => !empty($tokens['access_token'])
+        ]);
+
+        $notionService = new \App\Services\NotionService();
+        $extractor = new \App\Services\DocumentExtractionService();
+        $uploader = new \App\Services\FileUploadService();
+
+        if (empty($tokens['access_token'])) {
+            Log::error("No access token found for Notion connector");
+            $errors++;
+            return [];
+        }
+
+        $notionService->setAccessToken($tokens['access_token']);
+
+        try {
+            Log::info('Searching Notion pages...');
+            
+            $allPages = [];
+            $startCursor = null;
+            
+            // Paginate through all pages
+            do {
+                $searchResult = $notionService->searchPages($startCursor);
+                $pages = $searchResult['results'] ?? [];
+                $allPages = array_merge($allPages, $pages);
+                
+                $hasMore = $searchResult['has_more'] ?? false;
+                $startCursor = $hasMore ? ($searchResult['next_cursor'] ?? null) : null;
+            } while ($startCursor);
+
+            $totalFiles = count($allPages);
+
+            Log::info("✅ Found {$totalFiles} Notion pages", [
+                'page_count' => $totalFiles
+            ]);
+
+            // Update job with total files count
+            $job->stats = array_merge($job->stats, [
+                'total_files' => $totalFiles,
+                'processed_files' => 0,
+                'skipped_files' => 0,
+            ]);
+            $job->save();
+
+            foreach ($allPages as $index => $page) {
+                // Check if job has been cancelled
+                $job->refresh();
+                if ($job->status === 'cancelled') {
+                    Log::info('🛑 Job cancelled by user, stopping processing', [
+                        'job_id' => $job->id,
+                        'processed_files' => $processedFiles,
+                        'total_files' => count($allPages)
+                    ]);
+                    return [];
+                }
+                
+                // Check quota before processing each page
+                $quotaCheck = \App\Services\UsageLimitService::canAddDocument($this->orgId);
+                if (!$quotaCheck['allowed']) {
+                    Log::warning('🛑 Document quota reached mid-sync, stopping page processing', [
+                        'job_id' => $job->id,
+                        'quota_used' => $quotaCheck['current_usage'],
+                        'quota_limit' => $quotaCheck['limit'],
+                        'processed_files' => $processedFiles,
+                        'remaining_files' => count($allPages) - $index,
+                    ]);
+                    
+                    $job->stats = array_merge($job->stats, [
+                        'quota_reached' => true,
+                        'quota_message' => 'Document quota reached. Processed ' . $processedFiles . ' of ' . count($allPages) . ' pages.',
+                    ]);
+                    $job->save();
+                    
+                    break;
+                }
+
+                try {
+                    $pageId = $page['id'];
+                    $pageType = $page['object'] ?? 'page';
+                    $isDatabase = ($pageType === 'database');
+                    
+                    $pageTitle = $notionService->getPageTitle($page);
+                    $pageUrl = $notionService->getPageUrl($pageId);
+
+                    Log::info("Processing Notion {$pageType} #{$index}", [
+                        'title' => $pageTitle,
+                        'id' => $pageId,
+                        'is_database' => $isDatabase,
+                    ]);
+
+                    // Update current file being processed
+                    $job->stats = array_merge($job->stats, [
+                        'current_file' => $pageTitle,
+                        'processed_files' => $processedFiles,
+                    ]);
+                    $job->save();
+
+                    // Check if document already exists
+                    $existingDocument = \App\Models\Document::where('org_id', $this->orgId)
+                        ->where('connector_id', $connector->id)
+                        ->where('source_url', $pageUrl)
+                        ->first();
+
+                    $text = '';
+
+                    // Handle databases differently
+                    if ($isDatabase) {
+                        Log::info("Querying Notion database: {$pageTitle}");
+                        
+                        try {
+                            // Query all items in the database
+                            $allItems = [];
+                            $itemCursor = null;
+                            
+                            do {
+                                $itemsResult = $notionService->queryDatabase($pageId, $itemCursor);
+                                $items = $itemsResult['results'] ?? [];
+                                $allItems = array_merge($allItems, $items);
+                                
+                                $hasMore = $itemsResult['has_more'] ?? false;
+                                $itemCursor = $hasMore ? ($itemsResult['next_cursor'] ?? null) : null;
+                            } while ($itemCursor);
+
+                            Log::info("Found " . count($allItems) . " items in database: {$pageTitle}");
+
+                            // Extract text from database items and their content
+                            foreach ($allItems as $itemIndex => $item) {
+                                try {
+                                    // Extract properties text
+                                    $text .= "\n--- Item " . ($itemIndex + 1) . " ---\n";
+                                    $itemText = $notionService->extractDatabaseItemText($item);
+                                    
+                                    // Ensure we got a string
+                                    if (is_string($itemText)) {
+                                        $text .= $itemText;
+                                    } else {
+                                        Log::warning("Database item text extraction returned non-string", [
+                                            'item_index' => $itemIndex,
+                                            'type' => gettype($itemText)
+                                        ]);
+                                    }
+                                    
+                                    // Also get the page content of each database item
+                                    $itemId = $item['id'];
+                                    $itemBlocks = [];
+                                    $blockCursor = null;
+                                    
+                                    do {
+                                        $blocksResult = $notionService->getPageBlocks($itemId, $blockCursor);
+                                        $blocks = $blocksResult['results'] ?? [];
+                                        $itemBlocks = array_merge($itemBlocks, $blocks);
+                                        
+                                        $hasMore = $blocksResult['has_more'] ?? false;
+                                        $blockCursor = $hasMore ? ($blocksResult['next_cursor'] ?? null) : null;
+                                    } while ($blockCursor);
+                                    
+                                    if (!empty($itemBlocks)) {
+                                        $blockText = $notionService->extractTextFromBlocksRecursive($itemBlocks);
+                                        if (is_string($blockText)) {
+                                            $text .= $blockText;
+                                        }
+                                    }
+                                } catch (\Throwable $itemError) {
+                                    Log::warning("Error processing database item", [
+                                        'database' => $pageTitle,
+                                        'item_index' => $itemIndex,
+                                        'error' => $itemError->getMessage()
+                                    ]);
+                                    // Continue with next item
+                                    continue;
+                                }
+                            }
+                        } catch (\Throwable $dbError) {
+                            Log::error("Error processing Notion database", [
+                                'database' => $pageTitle,
+                                'pageId' => $pageId,
+                                'error' => $dbError->getMessage(),
+                                'file' => $dbError->getFile(),
+                                'line' => $dbError->getLine(),
+                                'trace' => $dbError->getTraceAsString()
+                            ]);
+                            // Count as error and mark this page as done - throw to outer catch
+                            throw $dbError;
+                        }
+                    } else {
+                        // Regular page - get all blocks (content) from the page
+                        $allBlocks = [];
+                        $blockCursor = null;
+                        
+                        do {
+                            $blocksResult = $notionService->getPageBlocks($pageId, $blockCursor);
+                            $blocks = $blocksResult['results'] ?? [];
+                            $allBlocks = array_merge($allBlocks, $blocks);
+                            
+                            $hasMore = $blocksResult['has_more'] ?? false;
+                            $blockCursor = $hasMore ? ($blocksResult['next_cursor'] ?? null) : null;
+                        } while ($blockCursor);
+
+                        // Extract text from blocks recursively (including child blocks)
+                        $text = $notionService->extractTextFromBlocksRecursive($allBlocks);
+                    }
+
+                    // Ensure $text is always a string (never an array)
+                    if (!is_string($text)) {
+                        Log::error("Text extraction returned non-string type", [
+                            'page' => $pageTitle,
+                            'type' => gettype($text),
+                            'value' => is_array($text) ? 'array' : $text
+                        ]);
+                        $text = ''; // Reset to empty string
+                    }
+
+                    if (empty(trim($text))) {
+                        Log::info("⚠️ No text extracted from Notion page: " . $pageTitle);
+                        $skippedFiles++;
+                        $processedFiles++;
+                        continue;
+                    }
+
+                    $contentHash = hash('sha256', $text);
+
+                    if ($existingDocument) {
+                        // Check if content changed
+                        if ($existingDocument->sha256 === $contentHash) {
+                            Log::info("⏭️ Notion page unchanged (by hash), skipping: " . $pageTitle, [
+                                'document_id' => $existingDocument->id,
+                            ]);
+                            $skippedFiles++;
+                            $processedFiles++;
+                            continue;
+                        }
+
+                        Log::info("🔄 Notion page changed, updating: " . $pageTitle, [
+                            'document_id' => $existingDocument->id,
+                        ]);
+
+                        // Delete old chunks
+                        \App\Models\Chunk::where('document_id', $existingDocument->id)->delete();
+
+                        // Update document
+                        $existingDocument->update([
+                            'title' => $pageTitle,
+                            'sha256' => $contentHash,
+                            'size' => strlen($text),
+                            'fetched_at' => now(),
+                        ]);
+
+                        $document = $existingDocument;
+                    } else {
+                        Log::info("➕ Creating new Notion document record for: " . $pageTitle);
+                        
+                        // Create new document record
+                        $document = \App\Models\Document::create([
+                            'id' => (string) \Illuminate\Support\Str::uuid(),
+                            'org_id' => $this->orgId,
+                            'connector_id' => $connector->id,
+                            'title' => $pageTitle,
+                            'source_url' => $pageUrl,
+                            'mime_type' => 'application/vnd.notion.page',
+                            'sha256' => $contentHash,
+                            'size' => strlen($text),
+                            's3_path' => null,
+                            'fetched_at' => now(),
+                            'doc_type' => 'notion_page',
+                        ]);
+                        
+                        // Track document ingestion for quota management
+                        \App\Services\CostTrackingService::trackDocumentIngestion(
+                            $this->orgId,
+                            $document->id,
+                            $this->connectorId,
+                            $job->id
+                        );
+                        
+                        Log::info("✅ Notion document created in DB", [
+                            'doc_id' => $document->id,
+                            'title' => $pageTitle,
+                        ]);
+                    }
+
+                    Log::info("Creating chunks for Notion page: " . $pageTitle);
+                    
+                    // Create chunks inline (same as Google Drive)
+                    $textChunks = $extractor->chunkText($text);
+                    Log::info("Text chunked", ['chunk_count' => count($textChunks)]);
+
+                    $createdChunks = [];
+                    foreach ($textChunks as $chunkIndex => $chunkText) {
+                        $chunk = \App\Models\Chunk::create([
+                            'id' => (string) \Illuminate\Support\Str::uuid(),
+                            'org_id' => $this->orgId,
+                            'document_id' => $document->id,
+                            'chunk_index' => $chunkIndex,
+                            'text' => $chunkText,
+                            'char_start' => $chunkIndex * 2000,
+                            'char_end' => ($chunkIndex + 1) * 2000,
+                            'token_count' => str_word_count($chunkText),
+                        ]);
+                        $createdChunks[] = $chunk;
+                        $chunks++;
+                    }
+
+                    // Generate embeddings inline (same as Google Drive)
+                    if (!empty($createdChunks)) {
+                        Log::info("Generating embeddings for Notion chunks", ['chunk_count' => count($createdChunks)]);
+                        $this->generateAndUploadEmbeddings($createdChunks, $job);
+                    }
+
+                    $docs++;
+                    $processedFiles++;
+
+                    Log::info("✅ Processed Notion page: " . $pageTitle, [
+                        'chunks_created' => count($textChunks),
+                        'total_docs' => $docs,
+                        'total_chunks' => $chunks,
+                        'progress' => round(($processedFiles / $totalFiles) * 100, 1) . '%'
+                    ]);
+
+                    // Update job progress every page
+                    $job->stats = array_merge($job->stats, [
+                        'docs' => $docs,
+                        'chunks' => $chunks,
+                        'errors' => $errors,
+                        'processed_files' => $processedFiles,
+                        'skipped_files' => $skippedFiles,
+                        'current_file' => $pageTitle,
+                    ]);
+                    $job->save();
+                } catch (\Exception $e) {
+                    Log::error("❌ Error processing Notion page", [
+                        'page_id' => $pageId ?? 'unknown',
+                        'error' => $e->getMessage(),
+                    ]);
+                    $errors++;
+                    $processedFiles++;
+                }
+            }
+
+            return [];
+        } catch (\Exception $e) {
+            Log::error("Notion ingestion error: " . $e->getMessage());
+            $errors++;
+            return [];
         }
     }
 

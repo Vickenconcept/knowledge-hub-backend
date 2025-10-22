@@ -62,11 +62,8 @@ class SocialAuthController extends Controller
                 // Create new user
                 $user = $this->createUserFromGoogle($googleUser);
                 
-                // Create getting started guide for new user
-                $organization = Organization::find($user->org_id);
-                if ($organization) {
-                    \App\Services\OnboardingService::createGettingStartedGuide($organization);
-                }
+                // Create getting started guide in background (non-blocking)
+                \App\Jobs\CreateGettingStartedGuideJob::dispatch($user->org_id);
                 
                 Log::info('New user created via Google', [
                     'user_id' => $user->id,

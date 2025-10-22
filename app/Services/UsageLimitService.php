@@ -73,21 +73,27 @@ class UsageLimitService
             })
             ->count();
         
-        // Count MONTHLY document ingestion (to prevent gaming)
-        // Strategy: Use documents.created_at as source of truth
-        // This counts all documents created this month, even if later deleted
-        // Exclude system guide documents from quota
-        $monthlyIngestion = DB::table('documents')
+        // Count MONTHLY document ingestion from cost_tracking (PERMANENT RECORD)
+        // This counts all documents ingested this month, even if later deleted
+        // This prevents quota gaming where users delete and re-sync
+        $monthlyIngestion = DB::table('cost_tracking')
             ->where('org_id', $orgId)
+            ->where('operation_type', 'document_ingestion')
             ->where('created_at', '>=', now()->startOfMonth())
-            ->where(function($query) {
-                $query->where('doc_type', '!=', 'guide')
-                      ->orWhereNull('doc_type');
-            })
             ->count();
         
-        // NOTE: We also track in cost_tracking for historical audit,
-        // but documents.created_at is the primary source for quota checks
+        // Fallback: If cost_tracking is empty (old data), use documents table
+        // But this is less reliable as deleted documents won't be counted
+        if ($monthlyIngestion === 0) {
+            $monthlyIngestion = DB::table('documents')
+                ->where('org_id', $orgId)
+                ->where('created_at', '>=', now()->startOfMonth())
+                ->where(function($query) {
+                    $query->where('doc_type', '!=', 'guide')
+                          ->orWhereNull('doc_type');
+                })
+                ->count();
+        }
         
         $maxDocuments = $limits['max_documents'];
         

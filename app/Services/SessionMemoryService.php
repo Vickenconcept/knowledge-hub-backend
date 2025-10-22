@@ -25,13 +25,13 @@ class SessionMemoryService
 
     /**
      * Check if conversation needs summarization
-     * Triggers every 10 message pairs (20 messages total)
+     * Triggers every 3 message pairs (6 messages total)
      */
     public function shouldSummarize(string $conversationId): bool
     {
         $messageCount = Message::where('conversation_id', $conversationId)->count();
         
-        // Check if we've crossed a 10-turn threshold
+        // Check if we've crossed a 3-turn threshold (more frequent summarization)
         $lastSummary = ConversationSummary::where('conversation_id', $conversationId)
             ->latest('turn_end')
             ->first();
@@ -39,7 +39,7 @@ class SessionMemoryService
         $lastSummarizedTurn = $lastSummary ? $lastSummary->turn_end : 0;
         $currentTurn = floor($messageCount / 2); // 2 messages = 1 turn (user + assistant)
         
-        $shouldSummarize = ($currentTurn - $lastSummarizedTurn) >= 10;
+        $shouldSummarize = ($currentTurn - $lastSummarizedTurn) >= 3;
         
         if ($shouldSummarize) {
             Log::info('Conversation ready for summarization', [
@@ -74,7 +74,7 @@ class SessionMemoryService
         $messages = Message::where('conversation_id', $conversationId)
             ->orderBy('created_at')
             ->skip($startIndex)
-            ->take(20) // Summarize up to 10 turns (20 messages)
+            ->take(6) // Summarize up to 3 turns (6 messages)
             ->get();
         
         if ($messages->count() < 4) {
