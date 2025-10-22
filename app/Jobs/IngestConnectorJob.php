@@ -9,6 +9,7 @@ use App\Services\DropboxService;
 use App\Services\FileUploadService;
 use App\Services\DocumentExtractionService;
 use App\Services\HttpDownloadService;
+use App\Services\DocumentProcessingService;
 use App\Models\Document;
 use App\Jobs\ProcessLargeFileJob;
 use Illuminate\Bus\Queueable;
@@ -76,8 +77,8 @@ class IngestConnectorJob implements ShouldQueue
 
         try {
             // Get tokens
-        $tokens = [];
-        if (!empty($connector->encrypted_tokens)) {
+            $tokens = [];
+            if (!empty($connector->encrypted_tokens)) {
                 try {
                     $tokens = json_decode(decrypt($connector->encrypted_tokens), true) ?: [];
                     Log::info('Tokens decrypted successfully', [
@@ -92,57 +93,15 @@ class IngestConnectorJob implements ShouldQueue
                 Log::warning('No encrypted tokens found for connector', ['connector_id' => $connector->id]);
             }
 
-        if ($connector->type === 'google_drive') {
-                Log::info('Starting Google Drive file processing...');
-                $largeFilesInfo = $this->processGoogleDriveFiles($connector, $tokens, $job, $docs, $chunks, $errors, $processedFiles, $skippedFiles);
-                Log::info('Google Drive file processing completed', [
-                    'docs' => $docs,
-                    'chunks' => $chunks,
-                    'errors' => $errors,
-                    'processed' => $processedFiles,
-                    'skipped' => $skippedFiles,
-                    'large_files_pending' => count($largeFilesInfo)
-                ]);
-            } elseif ($connector->type === 'dropbox') {
-                Log::info('Starting Dropbox file processing...');
-                $largeFilesInfo = $this->processDropboxFiles($connector, $tokens, $job, $docs, $chunks, $errors, $processedFiles, $skippedFiles);
-                Log::info('Dropbox file processing completed', [
-                    'docs' => $docs,
-                    'chunks' => $chunks,
-                    'errors' => $errors,
-                    'processed' => $processedFiles,
-                    'skipped' => $skippedFiles,
-                    'large_files_pending' => count($largeFilesInfo)
-                ]);
-            } elseif ($connector->type === 'slack') {
-                Log::info('Starting Slack message ingestion...');
-                $this->processSlackMessages($connector, $tokens, $job, $docs, $chunks, $errors);
-                Log::info('Slack message ingestion completed', [
-                    'docs' => $docs,
-                    'chunks' => $chunks,
-                    'errors' => $errors,
-                ]);
-            } elseif ($connector->type === 'manual_upload') {
-                Log::info('Starting Manual Upload processing...');
-                $this->processManualUploadFiles($connector, $job, $docs, $chunks, $errors, $processedFiles, $skippedFiles);
-                Log::info('Manual Upload processing completed', [
-                    'docs' => $docs,
-                    'chunks' => $chunks,
-                    'errors' => $errors,
-                    'processed' => $processedFiles,
-                    'skipped' => $skippedFiles,
-                ]);
-            } elseif ($connector->type === 'notion') {
-                Log::info('Starting Notion page ingestion...');
-                $this->processNotionPages($connector, $tokens, $job, $docs, $chunks, $errors, $processedFiles, $skippedFiles);
-                Log::info('Notion page ingestion completed', [
-                    'docs' => $docs,
-                    'chunks' => $chunks,
-                    'errors' => $errors,
-                    'processed' => $processedFiles,
-                    'skipped' => $skippedFiles,
-                ]);
-            }
+            // Use unified document processing service
+            $processor = new DocumentProcessingService();
+            $result = $this->processConnectorWithUnifiedService($connector, $tokens, $job, $processor);
+            
+            $docs = $result['docs'];
+            $chunks = $result['chunks'];
+            $errors = $result['errors'];
+            $processedFiles = $result['processedFiles'];
+            $skippedFiles = $result['skippedFiles'];
 
         } catch (\Throwable $e) {
             Log::error("Ingestion error: " . $e->getMessage(), [
@@ -261,7 +220,15 @@ class IngestConnectorJob implements ShouldQueue
                     'mime_type' => $document->mime_type
                 ]);
                 
-                if ($tmpPath && file_exists($tmpPath)) {
+                // Check if we already have extracted text from classification
+                $text = '';
+                if (!empty($metadata['extracted_text'])) {
+                    $text = $metadata['extracted_text'];
+                    Log::info("Using pre-extracted text from classification", [
+                        'document' => $document->title,
+                        'text_length' => strlen($text)
+                    ]);
+                } elseif ($tmpPath && file_exists($tmpPath)) {
                     // Use local file for reliable extraction
                     Log::info("Extracting from tmp file", ['path' => $tmpPath]);
                     $text = $extractor->extractText($tmpPath, $document->mime_type, $document->title);
@@ -2871,5 +2838,622 @@ class IngestConnectorJob implements ShouldQueue
         }
         
         return $chunks;
+    }
+
+    /**
+     * Unified connector processing using DocumentProcessingService
+     * Single source of truth for all connector types
+     */
+    private function processConnectorWithUnifiedService($connector, $tokens, $job, DocumentProcessingService $processor): array
+    {
+        $docs = 0;
+        $chunks = 0;
+        $errors = 0;
+        $processedFiles = 0;
+        $skippedFiles = 0;
+
+        Log::info("Processing connector with unified service", [
+            'connector_type' => $connector->type,
+            'connector_id' => $connector->id
+        ]);
+
+        try {
+            // Get documents based on connector type
+            $documents = $this->getDocumentsForConnector($connector, $tokens);
+            
+            $totalFiles = count($documents);
+            $job->stats = array_merge($job->stats, [
+                'total_files' => $totalFiles,
+                'processed_files' => 0,
+                'skipped_files' => 0,
+            ]);
+            $job->save();
+
+            Log::info("Found {$totalFiles} documents to process");
+
+            foreach ($documents as $index => $documentData) {
+                // Allow cancel mid-run
+                $job->refresh();
+                if ($job->status === 'cancelled') {
+                    return compact('docs', 'chunks', 'errors', 'processedFiles', 'skippedFiles');
+                }
+
+                // Quota check per file
+                $quotaCheck = \App\Services\UsageLimitService::canAddDocument($this->orgId);
+                if (!$quotaCheck['allowed']) {
+                    $job->stats = array_merge($job->stats, [
+                        'quota_reached' => true,
+                    ]);
+                    $job->save();
+                    break;
+                }
+
+                try {
+                    $job->stats = array_merge($job->stats, [
+                        'current_file' => $documentData['title'] ?? 'Unknown',
+                        'processed_files' => $processedFiles,
+                    ]);
+                    $job->save();
+
+                    // Process document using unified service
+                    $result = $processor->processDocument(
+                        $documentData,
+                        $this->orgId,
+                        $connector->id,
+                        $connector->type,
+                        [],
+                        $job
+                    );
+
+                    if ($result['success']) {
+                        $docs++;
+                        $chunks += $result['chunks_created'];
+                        $processedFiles++;
+                        
+                        Log::info("Document processed successfully", [
+                            'title' => $documentData['title'] ?? 'Unknown',
+                            'chunks_created' => $result['chunks_created']
+                        ]);
+                    } else {
+                        $errors++;
+                        $skippedFiles++;
+                        
+                        Log::warning("Document processing failed", [
+                            'title' => $documentData['title'] ?? 'Unknown',
+                            'error' => $result['error']
+                        ]);
+                    }
+
+                } catch (\Exception $e) {
+                    $errors++;
+                    $skippedFiles++;
+                    
+                    Log::error("Error processing document", [
+                        'title' => $documentData['title'] ?? 'Unknown',
+                        'error' => $e->getMessage()
+                    ]);
+                }
+            }
+
+        } catch (\Exception $e) {
+            Log::error("Error in unified connector processing", [
+                'connector_type' => $connector->type,
+                'error' => $e->getMessage()
+            ]);
+            $errors++;
+        }
+
+        return compact('docs', 'chunks', 'errors', 'processedFiles', 'skippedFiles');
+    }
+
+    /**
+     * Get documents for processing based on connector type
+     */
+    private function getDocumentsForConnector($connector, $tokens): array
+    {
+        switch ($connector->type) {
+            case 'manual_upload':
+                return $this->getManualUploadDocuments($connector);
+            
+            case 'google_drive':
+                return $this->getGoogleDriveDocuments($connector, $tokens);
+            
+            case 'dropbox':
+                return $this->getDropboxDocuments($connector, $tokens);
+            
+            case 'notion':
+                return $this->getNotionDocuments($connector, $tokens);
+            
+            case 'slack':
+                return $this->getSlackDocuments($connector, $tokens);
+            
+            default:
+                throw new \InvalidArgumentException("Unsupported connector type: {$connector->type}");
+        }
+    }
+
+    /**
+     * Get manual upload documents
+     */
+    private function getManualUploadDocuments($connector): array
+    {
+        $documents = Document::where('org_id', $this->orgId)
+            ->where('connector_id', $connector->id)
+            ->orderBy('created_at')
+            ->get();
+
+        return $documents->map(function($doc) {
+            return [
+                'id' => $doc->id,
+                'title' => $doc->title,
+                'mime_type' => $doc->mime_type,
+                's3_path' => $doc->s3_path,
+                'source_url' => $doc->source_url,
+                'metadata' => $doc->metadata ?? [],
+                'extracted_text' => $doc->metadata['extracted_text'] ?? null,
+            ];
+        })->toArray();
+    }
+
+    /**
+     * Get Google Drive documents
+     */
+    private function getGoogleDriveDocuments($connector, $tokens): array
+    {
+        $driveService = new GoogleDriveService();
+        $driveService->setAccessToken($tokens['access_token'] ?? '');
+        
+        // Refresh token if needed
+        $newToken = $driveService->refreshTokenIfNeeded($tokens);
+        if ($newToken) {
+            // Update connector with new token
+            $connector->encrypted_tokens = encrypt(json_encode($newToken));
+            $connector->save();
+        }
+
+        $files = $driveService->listFiles();
+        $documents = [];
+
+        foreach ($files->getFiles() as $file) {
+            try {
+                $content = $driveService->downloadFile($file->getId());
+                $documents[] = [
+                    'title' => $file->getName(),
+                    'mime_type' => $file->getMimeType(),
+                    'content' => $content,
+                    'size' => $file->getSize() ?? strlen($content),
+                    'metadata' => [
+                        'google_drive_id' => $file->getId(),
+                        'web_view_link' => $file->getWebViewLink(),
+                        'size' => $file->getSize(),
+                        'modified_time' => $file->getModifiedTime(),
+                    ]
+                ];
+            } catch (\Exception $e) {
+                Log::warning("Failed to download Google Drive file", [
+                    'file_id' => $file->getId(),
+                    'file_name' => $file->getName(),
+                    'error' => $e->getMessage()
+                ]);
+            }
+        }
+
+        return $documents;
+    }
+
+    /**
+     * Get Dropbox documents
+     */
+    private function getDropboxDocuments($connector, $tokens): array
+    {
+        $dropbox = new DropboxService($tokens['access_token'], $tokens['refresh_token'] ?? null);
+        $files = $dropbox->listFiles();
+        $documents = [];
+
+        foreach ($files as $file) {
+            try {
+                $content = $dropbox->downloadFile($file['path']);
+                $documents[] = [
+                    'title' => $file['name'],
+                    'mime_type' => $file['mime_type'],
+                    'content' => $content,
+                    'size' => $file['size'] ?? strlen($content),
+                    'metadata' => [
+                        'dropbox_path' => $file['path'],
+                        'size' => $file['size'],
+                        'modified_time' => $file['modified_time'],
+                    ]
+                ];
+            } catch (\Exception $e) {
+                Log::warning("Failed to download Dropbox file", [
+                    'path' => $file['path'],
+                    'name' => $file['name'],
+                    'error' => $e->getMessage()
+                ]);
+            }
+        }
+
+        return $documents;
+    }
+
+    /**
+     * Get Notion documents
+     */
+    private function getNotionDocuments($connector, $tokens): array
+    {
+        $notionService = new \App\Services\NotionService();
+        $notionService->setAccessToken($tokens['access_token']);
+        
+        $pages = $notionService->searchPages();
+        $documents = [];
+
+        foreach ($pages as $page) {
+            try {
+                $content = $notionService->getPageContent($page['id']);
+                $documents[] = [
+                    'title' => $page['title'],
+                    'mime_type' => 'text/plain',
+                    'content' => $content,
+                    'size' => strlen($content),
+                    'metadata' => [
+                        'notion_page_id' => $page['id'],
+                        'url' => $page['url'],
+                        'created_time' => $page['created_time'],
+                        'last_edited_time' => $page['last_edited_time'],
+                    ]
+                ];
+            } catch (\Exception $e) {
+                Log::warning("Failed to get Notion page content", [
+                    'page_id' => $page['id'],
+                    'title' => $page['title'],
+                    'error' => $e->getMessage()
+                ]);
+            }
+        }
+
+        return $documents;
+    }
+
+    /**
+     * Get Slack documents (one per channel with full conversation)
+     */
+    private function getSlackDocuments($connector, $tokens): array
+    {
+        $slackService = new \App\Services\SlackService();
+        $accessToken = $tokens['access_token'];
+        
+        $documents = [];
+        
+        try {
+            // Get all channels
+            $channels = $slackService->listChannels($accessToken);
+            
+            foreach ($channels['channels'] as $channel) {
+                // Get channel history
+                $history = $slackService->getChannelHistory($accessToken, $channel['id']);
+                
+                if (empty($history['messages'])) {
+                    continue; // Skip empty channels
+                }
+                
+                // Build conversation thread
+                $conversation = $this->buildSlackConversation($slackService, $accessToken, $channel, $history['messages']);
+                
+                if (!empty($conversation['content'])) {
+                    // 1. Create conversation document
+                    $documents[] = [
+                        'title' => "Slack Conversation: #{$channel['name']}",
+                        'mime_type' => 'text/plain',
+                        'content' => $conversation['content'],
+                        'size' => strlen($conversation['content']),
+                        'metadata' => [
+                            'slack_channel' => $channel['name'],
+                            'slack_channel_id' => $channel['id'],
+                            'message_count' => $conversation['message_count'],
+                            'participants' => $conversation['participants'],
+                            'conversation_type' => 'slack_channel',
+                        ]
+                    ];
+                    
+                    // 2. Create separate documents for each shared file
+                    foreach ($conversation['files'] as $file) {
+                        if (!empty($file['content'])) {
+                            $documents[] = [
+                                'title' => "Slack File: {$file['name']} from #{$channel['name']}",
+                                'mime_type' => $this->getMimeTypeFromSlackFileType($file['type']),
+                                'content' => $file['content'],
+                                'size' => strlen($file['content']),
+                                'metadata' => [
+                                    'slack_channel' => $channel['name'],
+                                    'slack_channel_id' => $channel['id'],
+                                    'original_filename' => $file['name'],
+                                    'file_type' => $file['type'],
+                                    'file_size' => $file['size'],
+                                    'shared_by' => $file['author'],
+                                    'shared_at' => $file['timestamp'],
+                                    'source_type' => 'slack_file',
+                                ]
+                            ];
+                        }
+                    }
+                }
+            }
+        } catch (\Exception $e) {
+            Log::error("Failed to fetch Slack messages", [
+                'error' => $e->getMessage()
+            ]);
+        }
+
+        return $documents;
+    }
+
+    /**
+     * Build conversation thread from Slack messages
+     */
+    private function buildSlackConversation($slackService, $accessToken, $channel, $messages): array
+    {
+        $conversation = [
+            'content' => '',
+            'message_count' => 0,
+            'participants' => [],
+            'attachments' => [],
+            'files' => []
+        ];
+        
+        // Get user info mapping
+        $userInfo = $this->getSlackUserInfo($slackService, $accessToken, $messages);
+        
+        // Sort messages by timestamp
+        usort($messages, function($a, $b) {
+            return floatval($a['ts']) <=> floatval($b['ts']);
+        });
+        
+        $threads = [];
+        $processedMessages = [];
+        
+        foreach ($messages as $message) {
+            // Skip bot messages and system messages
+            if (isset($message['bot_id']) || isset($message['subtype'])) {
+                continue;
+            }
+            
+            $messageId = $message['ts'];
+            if (in_array($messageId, $processedMessages)) {
+                continue;
+            }
+            
+            $processedMessages[] = $messageId;
+            
+            // Check if this is a thread reply
+            $threadTs = $message['thread_ts'] ?? null;
+            if ($threadTs) {
+                if (!isset($threads[$threadTs])) {
+                    $threads[$threadTs] = [];
+                }
+                $threads[$threadTs][] = $message;
+            } else {
+                // Main message
+                $threads[$messageId] = [$message];
+            }
+        }
+        
+        // Build conversation content
+        foreach ($threads as $threadTs => $threadMessages) {
+            $isMainThread = $threadTs === $threadMessages[0]['ts'];
+            
+            if ($isMainThread) {
+                $conversation['content'] .= "\n=== MAIN CONVERSATION ===\n";
+            } else {
+                $conversation['content'] .= "\n=== THREAD REPLY ===\n";
+            }
+            
+            foreach ($threadMessages as $message) {
+                $userId = $message['user'] ?? 'Unknown';
+                $userName = $userInfo[$userId] ?? $userId; // Use real name or fallback to ID
+                $text = $message['text'] ?? '';
+                $timestamp = date('Y-m-d H:i:s', floatval($message['ts']));
+                
+                // Add user to participants
+                if (!in_array($userName, $conversation['participants'])) {
+                    $conversation['participants'][] = $userName;
+                }
+                
+                // Format message
+                $conversation['content'] .= "[{$timestamp}] {$userName}: {$text}\n";
+                
+                // Handle attachments
+                if (isset($message['attachments']) && is_array($message['attachments'])) {
+                    foreach ($message['attachments'] as $attachment) {
+                        $conversation['attachments'][] = [
+                            'title' => $attachment['title'] ?? 'Untitled',
+                            'url' => $attachment['title_link'] ?? '',
+                            'text' => $attachment['text'] ?? '',
+                            'author' => $userName,
+                            'timestamp' => $timestamp
+                        ];
+                        $conversation['content'] .= "  📎 Attachment: {$attachment['title']}\n";
+                    }
+                }
+                
+                // Handle files
+                if (isset($message['files']) && is_array($message['files'])) {
+                    foreach ($message['files'] as $file) {
+                        $fileInfo = [
+                            'name' => $file['name'] ?? 'Unknown',
+                            'url' => $file['url_private'] ?? '',
+                            'type' => $file['filetype'] ?? 'unknown',
+                            'size' => $file['size'] ?? 0,
+                            'author' => $userName,
+                            'timestamp' => $timestamp,
+                            'content' => '' // Will be filled if file is downloaded
+                        ];
+                        
+                        // Try to download and process the file if it's a supported type
+                        if ($this->isSupportedFileType($file['filetype'] ?? '')) {
+                            try {
+                                $fileContent = $this->downloadSlackFile($slackService, $accessToken, $file);
+                                if ($fileContent) {
+                                    $fileInfo['content'] = $fileContent;
+                                    $conversation['content'] .= "  📁 File: {$file['name']} ({$file['filetype']}) - Content extracted\n";
+                                } else {
+                                    $conversation['content'] .= "  📁 File: {$file['name']} ({$file['filetype']}) - Could not extract content\n";
+                                }
+                            } catch (\Exception $e) {
+                                Log::warning("Failed to download Slack file", [
+                                    'file_name' => $file['name'],
+                                    'error' => $e->getMessage()
+                                ]);
+                                $conversation['content'] .= "  📁 File: {$file['name']} ({$file['filetype']}) - Download failed\n";
+                            }
+                        } else {
+                            $conversation['content'] .= "  📁 File: {$file['name']} ({$file['filetype']}) - Unsupported type\n";
+                        }
+                        
+                        $conversation['files'][] = $fileInfo;
+                    }
+                }
+                
+                $conversation['message_count']++;
+            }
+        }
+        
+        return $conversation;
+    }
+
+    /**
+     * Get Slack user info mapping (ID -> Real Name)
+     */
+    private function getSlackUserInfo($slackService, $accessToken, $messages): array
+    {
+        $userInfo = [];
+        $userIds = [];
+        
+        // Collect all unique user IDs from messages
+        foreach ($messages as $message) {
+            if (isset($message['user']) && !in_array($message['user'], $userIds)) {
+                $userIds[] = $message['user'];
+            }
+        }
+        
+        // Fetch user info for each user ID
+        foreach ($userIds as $userId) {
+            try {
+                $response = \Illuminate\Support\Facades\Http::withToken($accessToken)
+                    ->timeout(30)
+                    ->get('https://slack.com/api/users.info', [
+                        'user' => $userId
+                    ]);
+                
+                if ($response->successful()) {
+                    $userData = $response->json();
+                    if ($userData['ok'] && isset($userData['user'])) {
+                        $user = $userData['user'];
+                        $realName = $user['real_name'] ?? $user['display_name'] ?? $user['name'] ?? $userId;
+                        $userInfo[$userId] = $realName;
+                    }
+                }
+            } catch (\Exception $e) {
+                Log::warning("Failed to fetch Slack user info", [
+                    'user_id' => $userId,
+                    'error' => $e->getMessage()
+                ]);
+                // Fallback to user ID
+                $userInfo[$userId] = $userId;
+            }
+        }
+        
+        return $userInfo;
+    }
+
+    /**
+     * Check if file type is supported for processing
+     */
+    private function isSupportedFileType(string $fileType): bool
+    {
+        $supportedTypes = [
+            'txt', 'md', 'doc', 'docx', 'pdf', 'rtf',
+            'csv', 'xls', 'xlsx', 'ppt', 'pptx',
+            'html', 'htm', 'xml', 'json'
+        ];
+        
+        return in_array(strtolower($fileType), $supportedTypes);
+    }
+
+    /**
+     * Download and extract content from Slack file
+     */
+    private function downloadSlackFile($slackService, $accessToken, $file): ?string
+    {
+        try {
+            // Use Slack's files.info API to get download URL
+            $response = \Illuminate\Support\Facades\Http::withToken($accessToken)
+                ->timeout(60)
+                ->get('https://slack.com/api/files.info', [
+                    'file' => $file['id'] ?? ''
+                ]);
+            
+            if (!$response->successful()) {
+                return null;
+            }
+            
+            $fileInfo = $response->json();
+            if (!$fileInfo['ok']) {
+                return null;
+            }
+            
+            $downloadUrl = $fileInfo['file']['url_private_download'] ?? '';
+            if (empty($downloadUrl)) {
+                return null;
+            }
+            
+            // Download the file content
+            $fileContent = \Illuminate\Support\Facades\Http::withToken($accessToken)
+                ->timeout(120)
+                ->get($downloadUrl)
+                ->body();
+            
+            if (empty($fileContent)) {
+                return null;
+            }
+            
+            // Extract text based on file type
+            $extractor = new \App\Services\DocumentExtractionService();
+            $mimeType = $this->getMimeTypeFromSlackFileType($file['filetype'] ?? '');
+            
+            return $extractor->extractText($fileContent, $mimeType);
+            
+        } catch (\Exception $e) {
+            Log::error("Error downloading Slack file", [
+                'file_name' => $file['name'] ?? 'Unknown',
+                'error' => $e->getMessage()
+            ]);
+            return null;
+        }
+    }
+
+    /**
+     * Get MIME type from Slack file type
+     */
+    private function getMimeTypeFromSlackFileType(string $fileType): string
+    {
+        $mimeTypes = [
+            'txt' => 'text/plain',
+            'md' => 'text/markdown',
+            'doc' => 'application/msword',
+            'docx' => 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            'pdf' => 'application/pdf',
+            'rtf' => 'application/rtf',
+            'csv' => 'text/csv',
+            'xls' => 'application/vnd.ms-excel',
+            'xlsx' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            'ppt' => 'application/vnd.ms-powerpoint',
+            'pptx' => 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+            'html' => 'text/html',
+            'htm' => 'text/html',
+            'xml' => 'application/xml',
+            'json' => 'application/json',
+        ];
+        
+        return $mimeTypes[strtolower($fileType)] ?? 'application/octet-stream';
     }
 }

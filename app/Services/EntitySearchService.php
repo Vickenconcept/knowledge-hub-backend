@@ -162,10 +162,13 @@ class EntitySearchService
         $documentsQuery = Document::where('org_id', $orgId)->with('chunks');
         
         if ($entityInfo['entity_type'] === 'person') {
-            // For people: get resumes first, then other docs with email addresses
+            // For people: get resumes first, then other docs with email addresses, then any docs that might contain person info
             $documentsQuery->where(function($q) {
                 $q->whereIn('doc_type', ['resume', 'cv', 'cover_letter'])
-                  ->orWhereNotNull('metadata->emails');
+                  ->orWhereNotNull('metadata->emails')
+                  ->orWhere('title', 'LIKE', '%resume%')
+                  ->orWhere('title', 'LIKE', '%cv%')
+                  ->orWhere('title', 'REGEXP', '[A-Z]+_[A-Z]+'); // Names pattern like "WILLIAM_VICTOR"
             });
         }
         
@@ -253,9 +256,44 @@ class EntitySearchService
             $matchedSkills = [];
             $allTextLower = strtolower($allText);
             
+            // Enhanced skill matching with synonyms and variations
+            $skillSynonyms = [
+                'blockchain' => ['blockchain', 'web3', 'crypto', 'cryptocurrency', 'defi', 'nft', 'ethereum', 'bitcoin'],
+                'fullstack' => ['fullstack', 'full-stack', 'full stack', 'fullstack developer', 'frontend', 'backend'],
+                'react' => ['react', 'reactjs', 'react.js', 'reactjs'],
+                'javascript' => ['javascript', 'js', 'ecmascript', 'nodejs', 'node.js'],
+                'python' => ['python', 'py', 'python3', 'python2'],
+                'php' => ['php', 'laravel', 'symfony', 'codeigniter'],
+                'frontend' => ['frontend', 'front-end', 'ui', 'user interface', 'client-side'],
+                'backend' => ['backend', 'back-end', 'server-side', 'api'],
+                'database' => ['database', 'db', 'sql', 'mysql', 'postgresql', 'mongodb'],
+                'aws' => ['aws', 'amazon web services', 'ec2', 's3', 'lambda'],
+                'docker' => ['docker', 'containerization', 'containers'],
+                'kubernetes' => ['kubernetes', 'k8s', 'orchestration'],
+                'git' => ['git', 'github', 'gitlab', 'version control', 'vcs'],
+                'agile' => ['agile', 'scrum', 'sprint', 'kanban'],
+                'mobile' => ['mobile', 'ios', 'android', 'react native', 'flutter'],
+                'ui' => ['ui', 'user interface', 'interface design', 'ux'],
+                'ux' => ['ux', 'user experience', 'experience design']
+            ];
+            
             foreach ($entityInfo['skill_keywords'] as $skill) {
-                if (stripos($allTextLower, $skill) !== false) {
+                $skillLower = strtolower($skill);
+                
+                // Direct match
+                if (stripos($allTextLower, $skillLower) !== false) {
                     $matchedSkills[] = $skill;
+                    continue;
+                }
+                
+                // Check synonyms
+                if (isset($skillSynonyms[$skillLower])) {
+                    foreach ($skillSynonyms[$skillLower] as $synonym) {
+                        if (stripos($allTextLower, $synonym) !== false) {
+                            $matchedSkills[] = $skill;
+                            break;
+                        }
+                    }
                 }
             }
             
@@ -278,16 +316,77 @@ class EntitySearchService
         }
         
         // For general queries, return basic info
+        // Extract skills from the text for general recruitment queries
+        $extractedSkills = self::extractSkillsFromText($allText);
+        
         return [
             'name' => $name,
             'document_id' => $document->id,
             'document_title' => $document->title,
-            'all_skills' => $document->tags ?? [],
+            'matched_skills' => $extractedSkills,
+            'all_skills' => array_merge($document->tags ?? [], $extractedSkills),
             'email' => self::extractEmail($allText),
             'phone' => self::extractPhone($allText),
             'summary' => mb_substr($allText, 0, 200) . '...',
             'source_type' => $document->connector->type ?? 'unknown',
         ];
+    }
+    
+    /**
+     * Extract skills from text content
+     */
+    private static function extractSkillsFromText(string $text): array
+    {
+        $textLower = strtolower($text);
+        $skills = [];
+        
+        // Common technical skills to look for
+        $skillPatterns = [
+            'react' => ['react', 'reactjs', 'react.js'],
+            'javascript' => ['javascript', 'js', 'ecmascript', 'nodejs', 'node.js'],
+            'typescript' => ['typescript', 'ts'],
+            'python' => ['python', 'py'],
+            'php' => ['php', 'laravel', 'symfony'],
+            'java' => ['java', 'spring'],
+            'c#' => ['c#', 'csharp', '.net'],
+            'blockchain' => ['blockchain', 'web3', 'crypto', 'cryptocurrency', 'defi', 'nft', 'ethereum', 'bitcoin'],
+            'frontend' => ['frontend', 'front-end', 'ui', 'user interface', 'client-side'],
+            'backend' => ['backend', 'back-end', 'server-side', 'api'],
+            'fullstack' => ['fullstack', 'full-stack', 'full stack'],
+            'database' => ['database', 'db', 'sql', 'mysql', 'postgresql', 'mongodb', 'redis'],
+            'aws' => ['aws', 'amazon web services', 'ec2', 's3', 'lambda'],
+            'azure' => ['azure', 'microsoft azure'],
+            'gcp' => ['gcp', 'google cloud', 'google cloud platform'],
+            'docker' => ['docker', 'containerization', 'containers'],
+            'kubernetes' => ['kubernetes', 'k8s', 'orchestration'],
+            'git' => ['git', 'github', 'gitlab', 'version control', 'vcs'],
+            'agile' => ['agile', 'scrum', 'sprint', 'kanban'],
+            'mobile' => ['mobile', 'ios', 'android', 'react native', 'flutter'],
+            'ui' => ['ui', 'user interface', 'interface design'],
+            'ux' => ['ux', 'user experience', 'experience design'],
+            'html' => ['html', 'html5'],
+            'css' => ['css', 'css3', 'sass', 'scss', 'less'],
+            'vue' => ['vue', 'vuejs', 'vue.js'],
+            'angular' => ['angular', 'angularjs'],
+            'express' => ['express', 'express.js'],
+            'django' => ['django', 'flask'],
+            'rails' => ['rails', 'ruby on rails'],
+            'go' => ['go', 'golang'],
+            'rust' => ['rust'],
+            'swift' => ['swift', 'ios development'],
+            'kotlin' => ['kotlin', 'android development']
+        ];
+        
+        foreach ($skillPatterns as $skill => $patterns) {
+            foreach ($patterns as $pattern) {
+                if (stripos($textLower, $pattern) !== false) {
+                    $skills[] = $skill;
+                    break; // Found this skill, move to next
+                }
+            }
+        }
+        
+        return array_unique($skills);
     }
     
     /**

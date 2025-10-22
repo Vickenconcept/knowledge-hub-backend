@@ -110,7 +110,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('orgs/{org}/connectors', [ConnectorController::class, 'index'])->middleware('throttle:60,1'); // 60 requests per minute
     Route::post('orgs/{org}/connectors', [ConnectorController::class, 'create'])->middleware('throttle:10,1'); // 10 creates per minute
     Route::post('connectors/{id}/oauth/callback', [ConnectorController::class, 'oauthCallback'])->middleware('throttle:20,1'); // 20 callbacks per minute
-    Route::post('connectors/{id}/start-ingest', [ConnectorController::class, 'startIngest'])->middleware('throttle:5,1'); // 5 ingests per minute
+    Route::post('connectors/{id}/start-ingest', [ConnectorController::class, 'startIngest'])->middleware('throttle:10,1'); // 5 ingests per minute
     Route::post('connectors/{id}/stop-sync', [ConnectorController::class, 'stopSync'])->middleware('throttle:10,1'); // 10 stops per minute
     Route::post('connectors/{id}/disconnect', [ConnectorController::class, 'disconnect'])->middleware('throttle:10,1'); // 10 disconnects per minute
     Route::get('connectors/{connectorId}/job-status', [ConnectorController::class, 'getJobStatus'])->middleware('throttle:120,1'); // 120 status checks per minute
@@ -130,10 +130,10 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('connectors/notion/auth-url', [NotionController::class, 'authUrl']);
     
     // Manual Upload Integration (rate limited)
-    Route::post('connectors/manual-upload/create', [ManualUploadController::class, 'createConnector'])->middleware('throttle:10,1'); // 10 requests per minute
-    Route::post('connectors/manual-upload/upload', [ManualUploadController::class, 'uploadFiles'])->middleware('throttle:5,1'); // 5 uploads per minute
+    Route::post('connectors/manual-upload/create', [ManualUploadController::class, 'createConnector'])->middleware('throttle:30,1'); // 30 requests per minute
+    Route::post('connectors/manual-upload/upload', [ManualUploadController::class, 'uploadFiles'])->middleware('throttle:20,1'); // 20 uploads per minute
     Route::get('connectors/manual-upload/history', [ManualUploadController::class, 'getUploadHistory'])->middleware('throttle:60,1'); // 60 requests per minute
-    Route::delete('connectors/manual-upload/{documentId}', [ManualUploadController::class, 'deleteUpload'])->middleware('throttle:20,1'); // 20 deletes per minute
+    Route::delete('connectors/manual-upload/{documentId}', [ManualUploadController::class, 'deleteUpload'])->middleware('throttle:30,1'); // 30 deletes per minute
 
     // Documents
     Route::get('documents', [DocumentController::class, 'index']);

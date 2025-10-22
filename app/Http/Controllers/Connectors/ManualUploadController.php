@@ -6,6 +6,7 @@ use App\Models\Connector;
 use App\Models\Document;
 use App\Services\FileUploadService;
 use App\Services\DocumentExtractionService;
+use App\Services\DocumentClassificationService;
 use App\Jobs\CreateChunksJob;
 use App\Jobs\IngestConnectorJob;
 use App\Http\Traits\StandardizedErrorResponse;
@@ -79,7 +80,7 @@ class ManualUploadController extends BaseConnectorController
     /**
      * Handle bulk file upload
      */
-    public function uploadFiles(Request $request, FileUploadService $uploader, DocumentExtractionService $extractor)
+    public function uploadFiles(Request $request, FileUploadService $uploader, DocumentExtractionService $extractor, DocumentClassificationService $classifier)
     {
         $request->validate([
             'files' => 'required|array|min:1|max:50', // Max 50 files per upload
@@ -150,7 +151,29 @@ class ManualUploadController extends BaseConnectorController
                 // Upload to cloud storage
                 $upload = $uploader->uploadRawPath($tmpPath, 'knowledgehub/uploads', $original);
 
-                // Create document record
+                // Extract text for classification and metadata extraction
+                $extractedText = '';
+                try {
+                    $extractedText = $extractor->extractText($tmpPath, $mime);
+                    Log::info('Text extracted for classification', [
+                        'filename' => $file->getClientOriginalName(),
+                        'text_length' => strlen($extractedText)
+                    ]);
+                } catch (\Exception $e) {
+                    Log::warning('Failed to extract text for classification', [
+                        'filename' => $file->getClientOriginalName(),
+                        'error' => $e->getMessage()
+                    ]);
+                }
+
+                // Classify document and extract metadata
+                $classification = $classifier->classifyDocument(
+                    $extractedText,
+                    $file->getClientOriginalName(),
+                    $mime
+                );
+
+                // Create document record with extracted metadata
                 $document = Document::create([
                     'org_id' => $orgId,
                     'connector_id' => $connector->id,
@@ -161,14 +184,17 @@ class ManualUploadController extends BaseConnectorController
                     'size' => $fileSize,
                     's3_path' => $upload['secure_url'] ?? null,
                     'fetched_at' => now(),
-                    'metadata' => [
+                    'doc_type' => $classification['doc_type'],
+                    'tags' => $classification['tags'],
+                    'metadata' => array_merge([
                         'upload_type' => 'manual',
                         'uploaded_by' => $user->id,
                         'uploaded_at' => now()->toISOString(),
                         'original_filename' => $file->getClientOriginalName(),
                         'file_extension' => $ext,
                         'tmp_path' => $tmpPath, // Keep temp path for ingestion job
-                    ]
+                        'extracted_text' => $extractedText, // Store extracted text for reuse
+                    ], $classification['metadata'])
                 ]);
 
                 // Defer processing to a single ingestion job (like Google Drive)
@@ -179,6 +205,9 @@ class ManualUploadController extends BaseConnectorController
                     'title' => $document->title,
                     'size' => $fileSize,
                     'mime_type' => $mime,
+                    'doc_type' => $classification['doc_type'],
+                    'tags' => $classification['tags'],
+                    'metadata' => $classification['metadata'],
                     'status' => 'queued'
                 ];
 
