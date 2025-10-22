@@ -72,11 +72,16 @@ class DocumentController extends Controller
         });
         
         return response()->json([
+            'success' => true,
             'data' => $formatted,
-            'total' => $docs->total(),
-            'current_page' => $docs->currentPage(),
-            'per_page' => $docs->perPage(),
-            'last_page' => $docs->lastPage(),
+            'pagination' => [
+                'current_page' => $docs->currentPage(),
+                'last_page' => $docs->lastPage(),
+                'per_page' => $docs->perPage(),
+                'total' => $docs->total(),
+                'from' => $docs->firstItem(),
+                'to' => $docs->lastItem(),
+            ]
         ]);
     }
 
@@ -104,11 +109,16 @@ class DocumentController extends Controller
         
         // Format pagination response properly (excluding embedding binary data)
         return response()->json([
+            'success' => true,
             'data' => $chunks->items(),
-            'total' => $chunks->total(),
-            'current_page' => $chunks->currentPage(),
-            'per_page' => $chunks->perPage(),
-            'last_page' => $chunks->lastPage(),
+            'pagination' => [
+                'current_page' => $chunks->currentPage(),
+                'last_page' => $chunks->lastPage(),
+                'per_page' => $chunks->perPage(),
+                'total' => $chunks->total(),
+                'from' => $chunks->firstItem(),
+                'to' => $chunks->lastItem(),
+            ]
         ]);
     }
 

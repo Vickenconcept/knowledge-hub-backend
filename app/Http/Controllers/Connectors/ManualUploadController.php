@@ -8,6 +8,7 @@ use App\Services\FileUploadService;
 use App\Services\DocumentExtractionService;
 use App\Jobs\CreateChunksJob;
 use App\Jobs\IngestConnectorJob;
+use App\Http\Traits\StandardizedErrorResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
@@ -20,6 +21,7 @@ use Illuminate\Support\Facades\Storage;
  */
 class ManualUploadController extends BaseConnectorController
 {
+    use StandardizedErrorResponse;
     protected function getConnectorType(): string
     {
         return 'manual_upload';
@@ -111,15 +113,13 @@ class ManualUploadController extends BaseConnectorController
         // CHECK DOCUMENT LIMIT BEFORE UPLOAD
         $docLimit = \App\Services\UsageLimitService::canAddDocument($orgId);
         if (!$docLimit['allowed']) {
-            return response()->json([
-                'error' => 'Document limit exceeded',
-                'message' => $docLimit['reason'],
-                'limit_type' => 'max_documents',
-                'current_usage' => $docLimit['current_usage'],
-                'limit' => $docLimit['limit'],
-                'tier' => $docLimit['tier'],
-                'upgrade_required' => true,
-            ], 429);
+            return $this->usageLimitErrorResponse(
+                $docLimit['reason'],
+                'max_documents',
+                $docLimit['current_usage'],
+                $docLimit['limit'],
+                $docLimit['tier']
+            );
         }
 
         $uploadedFiles = [];
@@ -272,7 +272,7 @@ class ManualUploadController extends BaseConnectorController
             ->first();
 
         if (!$document) {
-            return response()->json(['error' => 'Document not found'], 404);
+            return $this->notFoundErrorResponse('Document');
         }
 
         // Delete from vector store

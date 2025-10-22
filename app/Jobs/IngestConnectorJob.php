@@ -281,20 +281,24 @@ class IngestConnectorJob implements ShouldQueue
                     if (filter_var($source, FILTER_VALIDATE_URL)) {
                         try {
                             Log::info("Downloading file from URL", ['url' => $source]);
-                            $content = @file_get_contents($source);
-                            if ($content === false) {
+                            $downloadService = new HttpDownloadService();
+                            $downloadResult = $downloadService->download($source);
+                            
+                            if (!$downloadResult['success']) {
                                 Log::warning("Failed to download file from URL", [
                                     'document' => $document->title,
-                                    'url' => $source
+                                    'url' => $source,
+                                    'error' => $downloadResult['error']
                                 ]);
                                 $text = '';
                             } else {
                                 Log::info("File downloaded successfully", [
-                                    'content_length' => strlen($content),
-                                    'first_bytes' => substr($content, 0, 10)
+                                    'content_length' => $downloadResult['content_length'],
+                                    'content_type' => $downloadResult['content_type'],
+                                    'first_bytes' => substr($downloadResult['content'], 0, 10)
                                 ]);
                                 // Extract from downloaded content
-                                $text = $extractor->extractText($content, $document->mime_type, $document->title);
+                                $text = $extractor->extractText($downloadResult['content'], $document->mime_type, $document->title);
                             }
                         } catch (\Exception $e) {
                             Log::error("Error downloading file: " . $e->getMessage(), [

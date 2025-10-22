@@ -534,23 +534,37 @@ class ChatController extends Controller
     {
         $user = $request->user();
         
+        $perPage = min($request->get('per_page', 20), 100); // Max 100 per page
+        $page = max($request->get('page', 1), 1);
+        
         $conversations = Conversation::where('user_id', $user->id)
             ->orderBy('last_message_at', 'desc')
             ->with(['messages' => function($q) {
                 $q->orderBy('created_at', 'desc')->limit(1);
             }])
-            ->get();
+            ->paginate($perPage, ['*'], 'page', $page);
 
-        return response()->json($conversations->map(function($conv) {
-            $lastMessage = $conv->messages->first();
-            return [
-                'id' => $conv->id,
-                'title' => $conv->title,
-                'last_message' => $lastMessage ? $lastMessage->content : null,
-                'last_message_at' => $conv->last_message_at,
-                'created_at' => $conv->created_at,
-            ];
-        }));
+        return response()->json([
+            'success' => true,
+            'data' => $conversations->map(function($conv) {
+                $lastMessage = $conv->messages->first();
+                return [
+                    'id' => $conv->id,
+                    'title' => $conv->title,
+                    'last_message' => $lastMessage ? $lastMessage->content : null,
+                    'last_message_at' => $conv->last_message_at,
+                    'created_at' => $conv->created_at,
+                ];
+            }),
+            'pagination' => [
+                'current_page' => $conversations->currentPage(),
+                'last_page' => $conversations->lastPage(),
+                'per_page' => $conversations->perPage(),
+                'total' => $conversations->total(),
+                'from' => $conversations->firstItem(),
+                'to' => $conversations->lastItem(),
+            ]
+        ]);
     }
 
     public function getConversation(Request $request, $id)
