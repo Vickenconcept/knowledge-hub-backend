@@ -15,6 +15,15 @@ class DocumentExtractionService
                 $content = @file_get_contents($content) ?: '';
             }
 
+            // Check if it's a DOCX file based on filename or content signature
+            $isDocx = false;
+            if ($filename && (str_ends_with(strtolower($filename), '.docx') || str_ends_with(strtolower($filename), '.DOCX'))) {
+                $isDocx = true;
+            } elseif (str_starts_with($content, 'PK')) {
+                // Check ZIP signature - might be a DOCX
+                $isDocx = true;
+            }
+
             return match (true) {
                 str_contains($mimeType, 'text/plain') => $this->extractPlainText($content),
                 str_contains($mimeType, 'text/html') => $this->extractHtmlText($content),
@@ -22,18 +31,21 @@ class DocumentExtractionService
                 str_contains($mimeType, 'application/pdf') => $this->extractPdfText($content),
                 str_contains($mimeType, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') => $this->extractDocxText($content),
                 str_contains($mimeType, 'application/msword') => $this->extractDocText($content),
-                str_contains($mimeType, 'application/vnd.google-apps.') => $content, // Already extracted as text
+                str_contains($mimeType, 'application/vnd.google-apps.') => $this->sanitizeText($content), // Already extracted as text but sanitize it
+                // Handle DOCX files misdetected as application/zip
+                str_contains($mimeType, 'application/zip') && $isDocx => $this->extractDocxText($content),
                 default => $this->extractPlainText($content)
             };
         } catch (\Exception $e) {
             Log::error("Error extracting text from {$filename} (type: {$mimeType}): " . $e->getMessage());
-            return "Error extracting text from this file: " . $e->getMessage();
+            // Sanitize error messages too to prevent any binary data leaking in
+            return $this->sanitizeText("Error extracting text from this file: " . $e->getMessage());
         }
     }
 
     private function extractPlainText($content)
     {
-        return trim($content);
+        return $this->sanitizeText(trim($content));
     }
 
     private function extractHtmlText($content)
@@ -41,7 +53,7 @@ class DocumentExtractionService
         // Remove HTML tags and decode entities
         $text = strip_tags($content);
         $text = html_entity_decode($text, ENT_QUOTES, 'UTF-8');
-        return trim($text);
+        return $this->sanitizeText(trim($text));
     }
 
     private function extractCsvText($content)
@@ -56,8 +68,8 @@ class DocumentExtractionService
             }
         }
 
-                    return trim($text);
-                }
+        return $this->sanitizeText(trim($text));
+    }
 
     private function extractPdfText($content)
     {
@@ -181,7 +193,7 @@ class DocumentExtractionService
                             }
                             
                             @unlink($tmpFile);
-                            $extractedText = trim($text);
+                            $extractedText = $this->sanitizeText(trim($text));
                             Log::info('DOCX text extracted with DOMDocument', ['text_length' => strlen($extractedText), 'node_count' => $textNodes->length]);
                             return $extractedText;
                         } catch (\Exception $e) {
@@ -199,7 +211,7 @@ class DocumentExtractionService
                         }
 
                         @unlink($tmpFile);
-                        $extractedText = trim($text);
+                        $extractedText = $this->sanitizeText(trim($text));
                         Log::info('DOCX text extracted successfully', ['text_length' => strlen($extractedText)]);
                         return $extractedText;
                     }
@@ -211,17 +223,17 @@ class DocumentExtractionService
             }
 
             @unlink($tmpFile);
-            return "Unable to extract DOCX content. File size: " . strlen($content) . " bytes";
+            return $this->sanitizeText("Unable to extract DOCX content. File size: " . strlen($content) . " bytes");
         } catch (\Exception $e) {
             Log::error("DOCX extraction exception: " . $e->getMessage(), ['trace' => $e->getTraceAsString()]);
-            return "DOCX extraction error: " . $e->getMessage();
+            return $this->sanitizeText("DOCX extraction error: " . $e->getMessage());
         }
     }
 
     private function extractDocText($content)
     {
         // For DOC extraction, you would need a specialized library
-        return "DOC content extraction not implemented yet. File size: " . strlen($content) . " bytes";
+        return $this->sanitizeText("DOC content extraction not implemented yet. File size: " . strlen($content) . " bytes");
     }
 
     private function sanitizeText(string $text): string

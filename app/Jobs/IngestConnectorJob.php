@@ -252,16 +252,68 @@ class IngestConnectorJob implements ShouldQueue
                 $metadata = $document->metadata ?? [];
                 $tmpPath = $metadata['tmp_path'] ?? null;
                 
+                Log::info("Processing manual upload document", [
+                    'document' => $document->title,
+                    'has_tmp_path' => !empty($tmpPath),
+                    'tmp_exists' => $tmpPath ? file_exists($tmpPath) : false,
+                    'has_s3_path' => !empty($document->s3_path),
+                    'mime_type' => $document->mime_type
+                ]);
+                
                 if ($tmpPath && file_exists($tmpPath)) {
                     // Use local file for reliable extraction
+                    Log::info("Extracting from tmp file", ['path' => $tmpPath]);
                     $text = $extractor->extractText($tmpPath, $document->mime_type, $document->title);
                     // Clean up temp file after extraction
                     @unlink($tmpPath);
                 } else {
-                    // Fallback to cloud URL (though may not work for DOCX)
+                    // Fallback to cloud URL - download it first
                     $source = $document->s3_path ?: $document->source_url;
-                    $text = $extractor->extractText($source, $document->mime_type, $document->title);
+                    
+                    Log::info("Fallback to cloud source", [
+                        'document' => $document->title,
+                        'source' => $source,
+                        'is_url' => filter_var($source, FILTER_VALIDATE_URL)
+                    ]);
+                    
+                    // If source is a URL, download it first
+                    if (filter_var($source, FILTER_VALIDATE_URL)) {
+                        try {
+                            Log::info("Downloading file from URL", ['url' => $source]);
+                            $content = @file_get_contents($source);
+                            if ($content === false) {
+                                Log::warning("Failed to download file from URL", [
+                                    'document' => $document->title,
+                                    'url' => $source
+                                ]);
+                                $text = '';
+                            } else {
+                                Log::info("File downloaded successfully", [
+                                    'content_length' => strlen($content),
+                                    'first_bytes' => substr($content, 0, 10)
+                                ]);
+                                // Extract from downloaded content
+                                $text = $extractor->extractText($content, $document->mime_type, $document->title);
+                            }
+                        } catch (\Exception $e) {
+                            Log::error("Error downloading file: " . $e->getMessage(), [
+                                'document' => $document->title,
+                                'url' => $source
+                            ]);
+                            $text = '';
+                        }
+                    } else {
+                        // It's a file path
+                        Log::info("Extracting from file path", ['path' => $source]);
+                        $text = $extractor->extractText($source, $document->mime_type, $document->title);
+                    }
                 }
+
+                Log::info("Text extraction completed", [
+                    'document' => $document->title,
+                    'text_length' => strlen($text),
+                    'text_preview' => substr($text, 0, 100)
+                ]);
 
                 if (empty(trim($text))) {
                     Log::info("⚠️ No text extracted from: " . $document->title);
@@ -273,7 +325,8 @@ class IngestConnectorJob implements ShouldQueue
                 $textChunks = $extractor->chunkText($text);
                 Log::info("Text chunked for manual upload", [
                     'document' => $document->title,
-                    'chunk_count' => count($textChunks)
+                    'chunk_count' => count($textChunks),
+                    'first_chunk_preview' => substr($textChunks[0] ?? '', 0, 100)
                 ]);
 
                 $createdChunks = [];

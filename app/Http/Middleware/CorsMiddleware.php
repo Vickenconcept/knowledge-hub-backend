@@ -17,7 +17,7 @@ class CorsMiddleware
     {
         $origin = $request->header('Origin');
         
-        // Allow localhost origins for development
+        // Allowed origins for production and development
         $allowedOrigins = [
             'http://localhost:3000',
             'http://127.0.0.1:3000',
@@ -28,14 +28,20 @@ class CorsMiddleware
             'https://knowledge-hub-frontend.vercel.app',
         ];
         
+        // Check if the origin is in the allowed list
+        if ($origin && in_array($origin, $allowedOrigins)) {
+            $allowedOrigin = $origin;
+        } 
         // For development, allow any localhost origin
-        if ($origin && (
+        elseif ($origin && (
             str_starts_with($origin, 'http://localhost:') || 
             str_starts_with($origin, 'http://127.0.0.1:')
         )) {
             $allowedOrigin = $origin;
-        } else {
-            $allowedOrigin = 'http://localhost:3000';
+        } 
+        // Default fallback
+        else {
+            $allowedOrigin = $allowedOrigins[0];
         }
 
         // Handle preflight requests
@@ -44,7 +50,7 @@ class CorsMiddleware
                 ->header('Access-Control-Allow-Origin', $allowedOrigin)
                 ->header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH')
                 ->header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept, Origin, X-CSRF-TOKEN')
-                ->header('Access-Control-Allow-Credentials', 'false')
+                ->header('Access-Control-Allow-Credentials', 'true')
                 ->header('Access-Control-Max-Age', '86400');
         }
 
@@ -54,7 +60,7 @@ class CorsMiddleware
         $response->headers->set('Access-Control-Allow-Origin', $allowedOrigin);
         $response->headers->set('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
         $response->headers->set('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept, Origin, X-CSRF-TOKEN');
-        $response->headers->set('Access-Control-Allow-Credentials', 'false');
+        $response->headers->set('Access-Control-Allow-Credentials', 'true');
 
         return $response;
     }

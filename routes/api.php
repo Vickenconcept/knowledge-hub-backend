@@ -22,9 +22,15 @@ use App\Http\Controllers\TeamController;
 use App\Http\Controllers\StripeWebhookController;
 use App\Http\Controllers\FeedbackController;
 use App\Http\Controllers\FeedbackDashboardController;
+use App\Http\Controllers\PasswordResetController;
 
 Route::post('auth/register', [AuthController::class, 'register']);
 Route::post('auth/login', [AuthController::class, 'login']);
+
+// Password Reset (no auth required)
+Route::post('auth/password/reset-link', [PasswordResetController::class, 'sendResetLink']);
+Route::post('auth/password/verify-token', [PasswordResetController::class, 'verifyToken']);
+Route::post('auth/password/reset', [PasswordResetController::class, 'resetPassword']);
 
 // Google OAuth
 Route::get('auth/google', [SocialAuthController::class, 'redirectToGoogle']);
