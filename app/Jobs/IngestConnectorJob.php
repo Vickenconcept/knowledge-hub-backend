@@ -8,6 +8,7 @@ use App\Services\GoogleDriveService;
 use App\Services\DropboxService;
 use App\Services\FileUploadService;
 use App\Services\DocumentExtractionService;
+use App\Services\HttpDownloadService;
 use App\Models\Document;
 use App\Jobs\ProcessLargeFileJob;
 use Illuminate\Bus\Queueable;
