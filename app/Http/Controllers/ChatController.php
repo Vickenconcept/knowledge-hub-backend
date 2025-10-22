@@ -315,14 +315,33 @@ class ChatController extends Controller
             
             $llmResponse = $rag->callLLM($prompt, $maxTokens, $orgId, $user->id, $conversation->id, $queryText);
 
-            // Parse the LLM response (it returns JSON with answer + sources)
-            $parsedAnswer = json_decode($llmResponse['answer'] ?? '{}', true);
-            $answerText = is_array($parsedAnswer) ? ($parsedAnswer['answer'] ?? $llmResponse['answer']) : $llmResponse['answer'];
-            
+            // Parse and normalize the LLM response into a strict contract
+            $rawAnswer = $llmResponse['answer'] ?? '';
+            $answerText = is_string($rawAnswer) ? $rawAnswer : '';
+            $llmSources = [];
+
+            // Case 1: answer is a JSON string { answer, sources }
+            if (is_string($answerText)) {
+                $trimmed = ltrim($answerText);
+                if (strlen($trimmed) > 0 && $trimmed[0] === '{') {
+                    $decoded = json_decode($answerText, true);
+                    if (is_array($decoded)) {
+                        $answerText = (string) ($decoded['answer'] ?? $answerText);
+                        $llmSources = $decoded['sources'] ?? [];
+                    }
+                }
+            }
+
+            // Case 2: answer already came as array/object
+            if (is_array($rawAnswer)) {
+                $answerText = (string) ($rawAnswer['answer'] ?? '');
+                $llmSources = $rawAnswer['sources'] ?? $llmSources;
+            }
+
             // Convert literal \n to actual newlines for better formatting
-            $answerText = str_replace(['\\n', '\n'], "\n", $answerText);
-            
-            $llmSources = is_array($parsedAnswer) ? ($parsedAnswer['sources'] ?? []) : [];
+            if (is_string($answerText)) {
+                $answerText = str_replace(['\\n', '\n'], "\n", $answerText);
+            }
 
             // 5. Format sources with full details (title, URL, excerpt, type)
             // Group by document to avoid duplicate sources

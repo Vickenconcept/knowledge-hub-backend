@@ -209,7 +209,7 @@ class DocumentExtractionService
         }
 
         return $this->sanitizeText(trim($text));
-    }
+                }
 
     private function extractPdfText($content)
     {
@@ -258,8 +258,8 @@ class DocumentExtractionService
 
             // Fallback: Try Smalot PDFParser if pdftotext isn't available or failed
             if (class_exists('\Smalot\PdfParser\Parser')) {
-                try {
-                    $parser = new \Smalot\PdfParser\Parser();
+            try {
+                $parser = new \Smalot\PdfParser\Parser();
                     // Parse directly from content (no temp file needed - safer!)
                     $pdf = $parser->parseContent($content);
                     $text = $pdf->getText();
