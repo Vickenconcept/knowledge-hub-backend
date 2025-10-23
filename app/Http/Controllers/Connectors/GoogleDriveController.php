@@ -30,47 +30,59 @@ class GoogleDriveController extends BaseConnectorController
      */
     public function getAuthUrl(Request $request)
     {
+        $user = $request->user();
+        $orgId = $user->org_id;
+
+        // Get connector ID from request (passed from frontend)
+        $connectorId = $request->get('connector_id');
+        
+        if (!$connectorId) {
+            return response()->json([
+                'error' => 'Connector ID is required for Google Drive OAuth'
+            ], 400);
+        }
+
+        // Verify connector exists and belongs to user's org
+        $connector = Connector::where('id', $connectorId)
+            ->where('org_id', $orgId)
+            ->where('type', 'google_drive')
+            ->first();
+
+        if (!$connector) {
+            return response()->json([
+                'error' => 'Connector not found or access denied'
+            ], 404);
+        }
+
         $client = new GoogleClient();
         $client->setClientId(env('GOOGLE_CLIENT_ID'));
         $client->setClientSecret(env('GOOGLE_CLIENT_SECRET'));
         $client->setRedirectUri(env('GOOGLE_REDIRECT_URI'));
         $client->setAccessType('offline');
         $client->setPrompt('consent'); // Force consent screen to ensure all scopes are granted
-        $client->addScope([
+        
+        // Enhanced scopes for organization connections to access shared drives
+        $scopes = [
             'https://www.googleapis.com/auth/drive.readonly',
             'https://www.googleapis.com/auth/drive.metadata.readonly',
             'https://www.googleapis.com/auth/drive.file',
             'https://www.googleapis.com/auth/userinfo.email',
             'https://www.googleapis.com/auth/userinfo.profile',
-        ]);
+        ];
 
-        // Check if Google Drive connector already exists for this organization
-        $existingConnector = Connector::where('org_id', $request->user()->org_id)
-            ->where('type', 'google_drive')
-            ->first();
-
-        if ($existingConnector) {
-            // Update existing connector if it's disconnected
-            if ($existingConnector->status === 'disconnected') {
-                $connector = $existingConnector;
-            } else {
-                return response()->json([
-                    'message' => 'Google Drive is already connected for this organization'
-                ], 409);
-            }
-        } else {
-            // Create a new connector record
-            $connector = Connector::create([
-                'id' => (string) Str::uuid(),
-                'org_id' => $request->user()->org_id,
-                'type' => 'google_drive',
-                'label' => 'Google Drive',
-                'status' => 'disconnected',
-            ]);
+        // For organization connections, add shared drive access
+        if ($connector->connection_scope === 'organization') {
+            $scopes[] = 'https://www.googleapis.com/auth/drive.shared';
         }
 
-        // State can include connector id to reconcile on callback
-        $state = json_encode(['connector_id' => $connector->id]);
+        $client->addScope($scopes);
+
+        // State includes connector id and scope for proper routing
+        $state = json_encode([
+            'connector_id' => $connector->id,
+            'connection_scope' => $connector->connection_scope,
+            'workspace_name' => $connector->workspace_name,
+        ]);
         $client->setState(base64_encode($state));
 
         return response()->json([
@@ -109,6 +121,8 @@ class GoogleDriveController extends BaseConnectorController
 
         $state = json_decode(base64_decode($stateB64), true) ?: [];
         $connectorId = $state['connector_id'] ?? null;
+        $connectionScope = $state['connection_scope'] ?? null;
+        $workspaceName = $state['workspace_name'] ?? null;
         
         if (!$connectorId) {
             if ($request->isJson()) {
@@ -125,6 +139,13 @@ class GoogleDriveController extends BaseConnectorController
             }
             return $this->redirectToFrontend(false, 'connector_not_found');
         }
+
+        Log::info('Google Drive OAuth callback processing', [
+            'connector_id' => $connectorId,
+            'connection_scope' => $connectionScope,
+            'workspace_name' => $workspaceName,
+            'connector_scope' => $connector->connection_scope
+        ]);
 
         try {
             $client = new GoogleClient();

@@ -44,10 +44,32 @@ class DropboxController extends BaseConnectorController
             ], 500);
         }
 
+        // Get connector ID from request (passed from frontend)
+        $connectorId = $request->get('connector_id');
+        
+        if (!$connectorId) {
+            return response()->json([
+                'error' => 'Connector ID is required for Dropbox OAuth'
+            ], 400);
+        }
+
+        // Verify connector exists and belongs to user's org
+        $connector = Connector::where('id', $connectorId)
+            ->where('org_id', $orgId)
+            ->where('type', 'dropbox')
+            ->first();
+
+        if (!$connector) {
+            return response()->json([
+                'error' => 'Connector not found or access denied'
+            ], 404);
+        }
+
         // Generate state token for security
         $state = base64_encode(json_encode([
             'org_id' => $orgId,
             'user_id' => $user->id,
+            'connector_id' => $connectorId,
             'timestamp' => time(),
         ]));
 
@@ -89,6 +111,7 @@ class DropboxController extends BaseConnectorController
             $stateData = json_decode(base64_decode($state), true);
             $orgId = $stateData['org_id'];
             $userId = $stateData['user_id'];
+            $connectorId = $stateData['connector_id'];
 
             // Exchange code for tokens
             $response = Http::asForm()
@@ -148,45 +171,38 @@ class DropboxController extends BaseConnectorController
                 ]);
             }
 
-            // Check if connector already exists
-            $connector = Connector::where('org_id', $orgId)
+            // Find the specific connector by ID
+            $connector = Connector::where('id', $connectorId)
+                ->where('org_id', $orgId)
                 ->where('type', 'dropbox')
                 ->first();
 
-            if ($connector) {
-                // Update existing connector
-                $connector->update([
-                    'encrypted_tokens' => encrypt(json_encode($tokenData)),
-                    'status' => 'connected',
-                    'label' => $accountName,
-                    'metadata' => json_encode([
-                        'connected_at' => now()->toIso8601String(),
-                        'account_id' => $accountInfo['account_id'] ?? null,
-                        'email' => $accountInfo['email'] ?? null,
-                        'display_name' => $accountName,
-                    ]),
+            if (!$connector) {
+                Log::error('Dropbox connector not found', [
+                    'connector_id' => $connectorId,
+                    'org_id' => $orgId
                 ]);
-            } else {
-                // Create new connector
-                $connector = Connector::create([
-                    'id' => (string) Str::uuid(),
-                    'org_id' => $orgId,
-                    'type' => 'dropbox',
-                    'label' => $accountName,
-                    'status' => 'connected',
-                    'encrypted_tokens' => encrypt(json_encode($tokenData)),
-                    'metadata' => json_encode([
-                        'connected_at' => now()->toIso8601String(),
-                        'account_id' => $accountInfo['account_id'] ?? null,
-                        'email' => $accountInfo['email'] ?? null,
-                        'display_name' => $accountName,
-                    ]),
-                ]);
+                return redirect(config('app.frontend_url') . '/connectors?error=connector_not_found');
             }
+
+            // Update the specific connector with tokens and account info
+            $connector->update([
+                'encrypted_tokens' => encrypt(json_encode($tokenData)),
+                'status' => 'connected',
+                'label' => $accountName,
+                'metadata' => json_encode([
+                    'connected_at' => now()->toIso8601String(),
+                    'account_id' => $accountInfo['account_id'] ?? null,
+                    'email' => $accountInfo['email'] ?? null,
+                    'display_name' => $accountName,
+                ]),
+            ]);
 
             Log::info('Dropbox connector created/updated', [
                 'connector_id' => $connector->id,
                 'org_id' => $orgId,
+                'connection_scope' => $connector->connection_scope,
+                'workspace_name' => $connector->workspace_name,
             ]);
 
             return redirect(config('app.frontend_url') . '/connectors?dropbox_connected=true');
