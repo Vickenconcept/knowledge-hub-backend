@@ -367,6 +367,14 @@ class IngestConnectorJob implements ShouldQueue
                 $docs++;
                 $processedFiles++;
 
+                // ✅ Track document ingestion for quota management
+                \App\Services\CostTrackingService::trackDocumentIngestion(
+                    $this->orgId,
+                    $document->id,
+                    $this->connectorId,
+                    $job->id
+                );
+
                 // Update job progress
                 $job->stats = array_merge($job->stats, [
                     'docs' => $docs,

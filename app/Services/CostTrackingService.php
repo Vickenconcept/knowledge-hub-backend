@@ -51,6 +51,7 @@ class CostTrackingService
             'cost_usd' => $cost,
             'document_id' => $documentId,
             'ingest_job_id' => $ingestJobId,
+            'query_text' => null, // Embedding operations don't have query text
         ]);
         
         Log::info('Cost tracked: embedding', [
