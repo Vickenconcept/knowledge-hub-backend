@@ -27,6 +27,7 @@ class ConnectorController extends Controller
     public function index(Request $request)
     {
         $orgId = $request->user()->org_id;
+        $userId = $request->user()->id;
         
         // Clean up stuck jobs (running/queued for more than 1 hour)
         IngestJob::where('org_id', $orgId)
@@ -34,7 +35,19 @@ class ConnectorController extends Controller
             ->where('created_at', '<', now()->subHour())
             ->update(['status' => 'failed']);
         
+        // Get connectors with proper access control
         $connectors = Connector::where('org_id', $orgId)
+            ->where(function($query) use ($userId) {
+                // Show organization connectors to everyone
+                $query->where('connection_scope', 'organization')
+                      // Show personal connectors only to users with permission
+                      ->orWhere(function($q) use ($userId) {
+                          $q->where('connection_scope', 'personal')
+                            ->whereHas('userPermissions', function($permQuery) use ($userId) {
+                                $permQuery->where('user_id', $userId);
+                            });
+                      });
+            })
             ->withCount([
                 'documents' => function($query) {
                     // Exclude system guide documents from count
@@ -67,25 +80,96 @@ class ConnectorController extends Controller
 
     public function create(Request $request)
     {
-        $validated = $request->validate([
-            'type' => 'required|string',
-            'label' => 'nullable|string|max:255',
-        ]);
+        try {
+            \Log::info('=== CONNECTOR CREATE REQUEST ===', [
+                'user_id' => $request->user()->id,
+                'org_id' => $request->user()->org_id,
+                'request_data' => $request->all(),
+                'headers' => $request->headers->all()
+            ]);
 
-        $connector = Connector::create([
-            'id' => (string) Str::uuid(),
-            'org_id' => $request->user()->org_id,
-            'type' => $validated['type'],
-            'label' => $validated['label'] ?? ucfirst($validated['type']),
-            'status' => 'disconnected',
-        ]);
+            $validated = $request->validate([
+                'type' => 'required|string',
+                'label' => 'nullable|string|max:255',
+                'connection_scope' => 'nullable|string|in:organization,personal',
+                'workspace_name' => 'nullable|string|max:255',
+                'workspace_id' => 'nullable|string|max:255',
+                'is_primary' => 'nullable|boolean',
+                'workspace_metadata' => 'nullable|array',
+            ]);
 
-        $authUrl = url("/connectors/oauth/{$connector->id}");
+            $userId = $request->user()->id;
+            $orgId = $request->user()->org_id;
+            
+            $connector = Connector::create([
+                'id' => (string) Str::uuid(),
+                'org_id' => $orgId,
+                'type' => $validated['type'],
+                'label' => $validated['label'] ?? ucfirst($validated['type']),
+                'connection_scope' => $validated['connection_scope'] ?? 'organization',
+                'workspace_name' => $validated['workspace_name'] ?? null,
+                'workspace_id' => $validated['workspace_id'] ?? null,
+                'is_primary' => $validated['is_primary'] ?? false,
+                'workspace_metadata' => $validated['workspace_metadata'] ?? null,
+                'status' => 'disconnected',
+            ]);
 
-        return response()->json([
-            'connector' => $connector,
-            'auth_url' => $authUrl,
-        ]);
+            // For personal connectors, create user permission
+            if ($connector->connection_scope === 'personal') {
+                \App\Models\UserConnectorPermission::create([
+                    'id' => (string) Str::uuid(),
+                    'user_id' => $userId,
+                    'connector_id' => $connector->id,
+                    'permission_level' => 'admin', // Creator gets admin access
+                ]);
+                
+                \Log::info('Created user permission for personal connector', [
+                    'connector_id' => $connector->id,
+                    'user_id' => $userId,
+                    'permission_level' => 'admin'
+                ]);
+            }
+
+            $authUrl = url("/connectors/oauth/{$connector->id}");
+
+            \Log::info('=== CONNECTOR CREATE SUCCESS ===', [
+                'connector_id' => $connector->id,
+                'type' => $connector->type,
+                'connection_scope' => $connector->connection_scope,
+                'workspace_name' => $connector->workspace_name,
+                'auth_url' => $authUrl
+            ]);
+
+            return response()->json([
+                'success' => true,
+                'connector' => $connector,
+                'auth_url' => $authUrl,
+            ]);
+
+        } catch (\Illuminate\Validation\ValidationException $e) {
+            \Log::error('=== CONNECTOR CREATE VALIDATION ERROR ===', [
+                'errors' => $e->errors(),
+                'request_data' => $request->all()
+            ]);
+            
+            return response()->json([
+                'success' => false,
+                'error' => 'Validation failed',
+                'errors' => $e->errors()
+            ], 422);
+            
+        } catch (\Exception $e) {
+            \Log::error('=== CONNECTOR CREATE ERROR ===', [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+                'request_data' => $request->all()
+            ]);
+            
+            return response()->json([
+                'success' => false,
+                'error' => 'Failed to create connector: ' . $e->getMessage()
+            ], 500);
+        }
     }
 
     public function oauthCallback(Request $request, string $id)
@@ -378,6 +462,99 @@ class ConnectorController extends Controller
                 'chunks' => $chunksCount,
             ],
         ]);
+    }
+
+    /**
+     * Get user permissions for a connector
+     */
+    public function getPermissions(Request $request, string $id)
+    {
+        $connector = Connector::where('id', $id)
+            ->where('org_id', $request->user()->org_id)
+            ->firstOrFail();
+
+        // Only show permissions for personal connectors
+        if ($connector->connection_scope !== 'personal') {
+            return response()->json(['message' => 'Only personal connectors have user permissions'], 400);
+        }
+
+        $permissions = $connector->userPermissions()
+            ->with('user:id,name,email')
+            ->get();
+
+        return response()->json($permissions);
+    }
+
+    /**
+     * Add user permission to a personal connector
+     */
+    public function addPermission(Request $request, string $id)
+    {
+        $validated = $request->validate([
+            'user_id' => 'required|integer|exists:users,id',
+            'permission_level' => 'required|string|in:read,write,admin',
+        ]);
+
+        $connector = Connector::where('id', $id)
+            ->where('org_id', $request->user()->org_id)
+            ->firstOrFail();
+
+        // Only allow permission management for personal connectors
+        if ($connector->connection_scope !== 'personal') {
+            return response()->json(['message' => 'Only personal connectors support user permissions'], 400);
+        }
+
+        // Check if user is in the same organization
+        $targetUser = \App\Models\User::where('id', $validated['user_id'])
+            ->where('org_id', $request->user()->org_id)
+            ->first();
+
+        if (!$targetUser) {
+            return response()->json(['message' => 'User not found in organization'], 404);
+        }
+
+        // Create or update permission
+        $permission = \App\Models\UserConnectorPermission::updateOrCreate(
+            [
+                'user_id' => $validated['user_id'],
+                'connector_id' => $id,
+            ],
+            [
+                'permission_level' => $validated['permission_level'],
+            ]
+        );
+
+        return response()->json([
+            'message' => 'Permission added successfully',
+            'permission' => $permission->load('user:id,name,email'),
+        ]);
+    }
+
+    /**
+     * Remove user permission from a personal connector
+     */
+    public function removePermission(Request $request, string $id, string $userId)
+    {
+        $connector = Connector::where('id', $id)
+            ->where('org_id', $request->user()->org_id)
+            ->firstOrFail();
+
+        // Only allow permission management for personal connectors
+        if ($connector->connection_scope !== 'personal') {
+            return response()->json(['message' => 'Only personal connectors support user permissions'], 400);
+        }
+
+        $permission = \App\Models\UserConnectorPermission::where('connector_id', $id)
+            ->where('user_id', $userId)
+            ->first();
+
+        if (!$permission) {
+            return response()->json(['message' => 'Permission not found'], 404);
+        }
+
+        $permission->delete();
+
+        return response()->json(['message' => 'Permission removed successfully']);
     }
 }
 

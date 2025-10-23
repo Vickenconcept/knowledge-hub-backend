@@ -52,13 +52,18 @@ class ChatController extends Controller
             'conversation_id' => 'nullable|string|uuid',
             'top_k' => 'nullable|integer|min:1|max:50',
             'connector_ids' => 'nullable|array', // Source filtering
-            'connector_ids.*' => 'string|uuid'
+            'connector_ids.*' => 'string|uuid',
+            'search_scope' => 'nullable|string|in:organization,personal,both', // Workspace scope
+            'workspace_ids' => 'nullable|array', // Specific workspace filtering
+            'workspace_ids.*' => 'string'
         ]);
 
         $queryText = $validated['query'];
         $topK = $validated['top_k'] ?? 10; // Reduced from 15 to 10 for faster responses (balance: quality vs speed)
         $conversationId = $validated['conversation_id'] ?? null;
         $requestedConnectorIds = $validated['connector_ids'] ?? null;
+        $searchScope = $validated['search_scope'] ?? 'both';
+        $workspaceIds = $validated['workspace_ids'] ?? null;
         
         // Detect natural language source mentions (e.g., "from dropbox", "in slack")
         $detectedSource = $this->detectSourceInQuery($queryText, $orgId);
@@ -214,13 +219,8 @@ class ChatController extends Controller
             if ($routing['search_documents']) {
             $embedding = $embeddingService->embed($queryText, $orgId);
                 
-                // Build Pinecone metadata filter for connector filtering
-                $pineconeFilter = null;
-                if (!empty($connectorIds)) {
-                    $pineconeFilter = [
-                        'connector_id' => ['$in' => $connectorIds]
-                    ];
-                }
+                // Build workspace-aware Pinecone metadata filter
+                $pineconeFilter = $this->buildWorkspaceAwareFilter($orgId, $user->id, $connectorIds, $searchScope, $workspaceIds);
                 
                 $matches = $vectorStore->query($embedding, $topK, $orgId, $orgId, $conversation->id, $pineconeFilter);
             $chunkIds = array_map(fn($m) => $m['id'], $matches);
@@ -405,12 +405,30 @@ class ChatController extends Controller
                 $sourcesByDocument[$documentId]['chunk_count']++;
             }
 
-            // Convert to array and add combined excerpts
+            // Convert to array and add combined excerpts with workspace tagging
             $formattedSources = [];
+            $workspaceStats = [];
+            
             foreach ($sourcesByDocument as $documentId => $source) {
                 // Combine excerpts with separator, limit to 2-3 most relevant
                 $topExcerpts = array_slice($source['excerpts'], 0, 3);
                 $combinedExcerpt = implode("\n\n...\n\n", $topExcerpts);
+                
+                // Get workspace information from connector
+                $workspaceInfo = null;
+                if (isset($source['connector'])) {
+                    $connector = $source['connector'];
+                    $workspaceInfo = [
+                        'workspace_name' => $connector['workspace_name'] ?? $connector['label'],
+                        'workspace_scope' => $connector['connection_scope'] ?? 'organization',
+                        'workspace_icon' => $connector['connection_scope'] === 'personal' ? '👤' : '🏢',
+                        'workspace_label' => $connector['connection_scope'] === 'personal' ? 'Personal' : 'Organization'
+                    ];
+                    
+                    // Track workspace stats
+                    $scope = $workspaceInfo['workspace_scope'];
+                    $workspaceStats[$scope] = ($workspaceStats[$scope] ?? 0) + 1;
+                }
                 
                 $formattedSources[] = [
                     'document_id' => $source['document_id'],
@@ -424,6 +442,7 @@ class ChatController extends Controller
                     'tags' => $source['tags'],
                     'metadata' => $source['metadata'],
                     'chunk_count' => $source['chunk_count'], // How many chunks from this doc
+                    'workspace_info' => $workspaceInfo, // Workspace context
                 ];
             }
 
@@ -469,6 +488,8 @@ class ChatController extends Controller
                 'query' => $queryText,
                 'result_count' => count($formattedSources),
                 'conversation_id' => $conversation->id,
+                'workspace_stats' => $workspaceStats, // Workspace breakdown
+                'search_scope' => $searchScope, // Applied search scope
                 'raw' => $llmResponse['raw'] ?? null
             ]);
 
@@ -789,5 +810,96 @@ class ChatController extends Controller
         ]);
         
         return !empty($connectors) ? $connectors : null;
+    }
+
+    /**
+     * Build workspace-aware Pinecone metadata filter
+     */
+    private function buildWorkspaceAwareFilter($orgId, $userId, $connectorIds, $searchScope, $workspaceIds)
+    {
+        $filter = [];
+
+        // Add connector filtering if specified
+        if (!empty($connectorIds)) {
+            $filter['connector_id'] = ['$in' => $connectorIds];
+        }
+
+        // Add workspace scope filtering
+        if ($searchScope !== 'both') {
+            $filter['source_scope'] = $searchScope;
+        }
+
+        // Add specific workspace filtering
+        if (!empty($workspaceIds)) {
+            $filter['workspace_id'] = ['$in' => $workspaceIds];
+        }
+
+        // For personal scope, ensure user has access to connectors
+        if ($searchScope === 'personal') {
+            $accessibleConnectors = $this->getUserAccessibleConnectors($orgId, $userId, 'personal');
+            if (!empty($accessibleConnectors)) {
+                $filter['connector_id'] = ['$in' => $accessibleConnectors];
+            } else {
+                // No accessible personal connectors
+                $filter['connector_id'] = ['$in' => []];
+            }
+        }
+
+        return !empty($filter) ? $filter : null;
+    }
+
+    /**
+     * Get connectors accessible to user based on scope
+     */
+    private function getUserAccessibleConnectors($orgId, $userId, $scope)
+    {
+        $query = Connector::where('org_id', $orgId);
+
+        if ($scope === 'personal') {
+            $query->where('connection_scope', 'personal')
+                  ->whereHas('userPermissions', function($q) use ($userId) {
+                      $q->where('user_id', $userId);
+                  });
+        } elseif ($scope === 'organization') {
+            $query->where('connection_scope', 'organization');
+        }
+
+        return $query->pluck('id')->toArray();
+    }
+
+    /**
+     * Tag sources with workspace information
+     */
+    private function tagSourcesWithWorkspace($snippets)
+    {
+        $taggedSources = [];
+        $workspaceStats = [];
+
+        foreach ($snippets as $snippet) {
+            $document = $snippet['document'];
+            $connector = $document['connector'] ?? null;
+            
+            if ($connector) {
+                $workspaceInfo = [
+                    'workspace_name' => $connector['workspace_name'] ?? $connector['label'],
+                    'workspace_scope' => $connector['connection_scope'] ?? 'organization',
+                    'workspace_icon' => $connector['connection_scope'] === 'personal' ? '👤' : '🏢',
+                    'workspace_label' => $connector['connection_scope'] === 'personal' ? 'Personal' : 'Organization'
+                ];
+
+                $snippet['workspace_info'] = $workspaceInfo;
+                
+                // Track workspace stats
+                $scope = $workspaceInfo['workspace_scope'];
+                $workspaceStats[$scope] = ($workspaceStats[$scope] ?? 0) + 1;
+            }
+
+            $taggedSources[] = $snippet;
+        }
+
+        return [
+            'sources' => $taggedSources,
+            'workspace_stats' => $workspaceStats
+        ];
     }
 }
