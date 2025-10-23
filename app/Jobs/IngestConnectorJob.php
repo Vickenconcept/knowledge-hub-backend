@@ -17,6 +17,7 @@ use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\DB;
 
 class IngestConnectorJob implements ShouldQueue
 {
@@ -32,6 +33,8 @@ class IngestConnectorJob implements ShouldQueue
 
     public function handle(): void
     {
+        // Ensure database connections are properly managed
+        DB::connection()->getPdo();
         Log::info('=== IngestConnectorJob STARTED ===', [
             'connector_id' => $this->connectorId,
             'org_id' => $this->orgId
@@ -203,6 +206,9 @@ class IngestConnectorJob implements ShouldQueue
             'total_errors' => $errors,
             'last_synced_at' => $connector->last_synced_at
         ]);
+
+        // Clean up database connections
+        DB::disconnect();
     }
 
     private function processManualUploadFiles($connector, $job, &$docs, &$chunks, &$errors, &$processedFiles, &$skippedFiles)
