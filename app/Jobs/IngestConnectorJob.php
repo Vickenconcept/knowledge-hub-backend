@@ -391,6 +391,8 @@ class IngestConnectorJob implements ShouldQueue
                         'char_start' => $index * 2000,
                         'char_end' => ($index + 1) * 2000,
                         'token_count' => str_word_count($chunkText),
+                        'source_scope' => $connector->connection_scope ?? 'organization',
+                        'workspace_name' => $connector->workspace_name,
                     ]);
                     $createdChunks[] = $chunk;
                     $chunks++;
@@ -712,6 +714,8 @@ class IngestConnectorJob implements ShouldQueue
                             's3_path' => null,
                             'fetched_at' => now(),
                             'doc_type' => 'notion_page',
+                            'source_scope' => $connector->connection_scope ?? 'organization',
+                            'workspace_name' => $connector->workspace_name,
                         ]);
                         
                         // Track document ingestion for quota management
@@ -745,6 +749,8 @@ class IngestConnectorJob implements ShouldQueue
                             'char_start' => $chunkIndex * 2000,
                             'char_end' => ($chunkIndex + 1) * 2000,
                             'token_count' => str_word_count($chunkText),
+                            'source_scope' => $connector->connection_scope ?? 'organization',
+                            'workspace_name' => $connector->workspace_name,
                         ]);
                         $createdChunks[] = $chunk;
                         $chunks++;
@@ -1116,6 +1122,8 @@ class IngestConnectorJob implements ShouldQueue
                             'tags' => $classification['tags'],
                             'sha256' => $contentHash,
                             'size' => strlen($content),
+                            'source_scope' => $connector->connection_scope ?? 'organization',
+                            'workspace_name' => $connector->workspace_name,
                             's3_path' => $cloudinaryUrl, // Store Cloudinary URL
                     'fetched_at' => now(),
                 ]);
@@ -2877,8 +2885,10 @@ class IngestConnectorJob implements ShouldQueue
                         'text' => $chunkText,
                         'char_start' => $index * 2000,
                         'char_end' => ($index + 1) * 2000,
-                        'token_count' => str_word_count($chunkText),
-                    ]);
+                            'token_count' => str_word_count($chunkText),
+                            'source_scope' => $connector->connection_scope ?? 'organization',
+                            'workspace_name' => $connector->workspace_name,
+                        ]);
                     $createdChunks[] = $chunk;
                     $chunks++;
                 }

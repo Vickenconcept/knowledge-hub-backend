@@ -819,9 +819,38 @@ class ChatController extends Controller
     {
         $filter = [];
 
-        // Add connector filtering if specified
+        // Get all connectors accessible to this user
+        $accessibleConnectors = [];
+        
+        // Always include organization connectors (accessible to all org members)
+        $orgConnectors = $this->getUserAccessibleConnectors($orgId, $userId, 'organization');
+        $accessibleConnectors = array_merge($accessibleConnectors, $orgConnectors);
+        
+        // Include personal connectors only if user has access to them
+        $personalConnectors = $this->getUserAccessibleConnectors($orgId, $userId, 'personal');
+        $accessibleConnectors = array_merge($accessibleConnectors, $personalConnectors);
+
+        // Apply search scope filtering
+        if ($searchScope === 'organization') {
+            // Only organization connectors
+            $accessibleConnectors = $orgConnectors;
+        } elseif ($searchScope === 'personal') {
+            // Only personal connectors that user has access to
+            $accessibleConnectors = $personalConnectors;
+        }
+        // For 'both' scope, use all accessible connectors (already merged above)
+
+        // Add connector filtering
         if (!empty($connectorIds)) {
-            $filter['connector_id'] = ['$in' => $connectorIds];
+            // Intersect with user-accessible connectors to ensure security
+            $accessibleConnectors = array_intersect($connectorIds, $accessibleConnectors);
+        }
+
+        if (!empty($accessibleConnectors)) {
+            $filter['connector_id'] = ['$in' => $accessibleConnectors];
+        } else {
+            // No accessible connectors - return empty result
+            $filter['connector_id'] = ['$in' => []];
         }
 
         // Add workspace scope filtering
@@ -834,16 +863,13 @@ class ChatController extends Controller
             $filter['workspace_id'] = ['$in' => $workspaceIds];
         }
 
-        // For personal scope, ensure user has access to connectors
-        if ($searchScope === 'personal') {
-            $accessibleConnectors = $this->getUserAccessibleConnectors($orgId, $userId, 'personal');
-            if (!empty($accessibleConnectors)) {
-                $filter['connector_id'] = ['$in' => $accessibleConnectors];
-            } else {
-                // No accessible personal connectors
-                $filter['connector_id'] = ['$in' => []];
-            }
-        }
+        \Log::info('=== WORKSPACE FILTER BUILT ===', [
+            'user_id' => $userId,
+            'org_id' => $orgId,
+            'search_scope' => $searchScope,
+            'accessible_connectors' => $accessibleConnectors,
+            'filter' => $filter
+        ]);
 
         return !empty($filter) ? $filter : null;
     }
