@@ -242,6 +242,38 @@ class IngestConnectorJob implements ShouldQueue
                 break;
             }
 
+            // Check for duplicate document by content hash
+            $metadata = $document->metadata ?? [];
+            $tmpPath = $metadata['tmp_path'] ?? null;
+            
+            if ($tmpPath && file_exists($tmpPath)) {
+                // Calculate content hash from temp file
+                $contentHash = hash_file('sha256', $tmpPath);
+                
+                // Check if document with same content already exists
+                $existingDocument = \App\Models\Document::where('org_id', $this->orgId)
+                    ->where('id', '!=', $document->id) // Exclude current document
+                    ->where('sha256', $contentHash)
+                    ->first();
+                
+                if ($existingDocument) {
+                    Log::info("⏭️ Duplicate document found, skipping: " . $document->title, [
+                        'document_id' => $document->id,
+                        'existing_document_id' => $existingDocument->id,
+                        'content_hash' => substr($contentHash, 0, 8)
+                    ]);
+                    
+                    // Delete the duplicate document
+                    $document->delete();
+                    $skippedFiles++;
+                    $processedFiles++;
+                    continue;
+                }
+                
+                // Update document with content hash
+                $document->update(['sha256' => $contentHash]);
+            }
+
             try {
                 $job->stats = array_merge($job->stats, [
                     'current_file' => $document->title,
@@ -367,13 +399,25 @@ class IngestConnectorJob implements ShouldQueue
                 $docs++;
                 $processedFiles++;
 
-                // ✅ Track document ingestion for quota management
-                \App\Services\CostTrackingService::trackDocumentIngestion(
-                    $this->orgId,
-                    $document->id,
-                    $this->connectorId,
-                    $job->id
-                );
+                // ✅ Track document ingestion for quota management (only for documents not already tracked)
+                $existingTracking = \App\Models\CostTracking::where('org_id', $this->orgId)
+                    ->where('document_id', $document->id)
+                    ->where('operation_type', 'document_ingestion')
+                    ->first();
+                
+                if (!$existingTracking) {
+                    \App\Services\CostTrackingService::trackDocumentIngestion(
+                        $this->orgId,
+                        $document->id,
+                        $this->connectorId,
+                        $job->id
+                    );
+                } else {
+                    Log::info("Document already tracked for quota, skipping: " . $document->title, [
+                        'document_id' => $document->id,
+                        'existing_tracking_id' => $existingTracking->id
+                    ]);
+                }
 
                 // Update job progress
                 $job->stats = array_merge($job->stats, [
