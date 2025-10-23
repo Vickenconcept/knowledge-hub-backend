@@ -147,6 +147,8 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('documents/{id}', [DocumentController::class, 'show']);
     Route::get('documents/{id}/chunks', [DocumentController::class, 'chunks']);
     Route::post('documents/{id}/reindex', [DocumentController::class, 'reindex']);
+    Route::put('documents/{id}/scope', [DocumentController::class, 'updateScope']);
+    Route::put('documents/bulk-scope', [DocumentController::class, 'bulkUpdateScope']);
     Route::delete('documents/{id}', [DocumentController::class, 'destroy']);
     Route::post('documents/bulk-delete', [DocumentController::class, 'bulkDestroy']);
     Route::post('documents/upload', [DocumentController::class, 'upload']);
