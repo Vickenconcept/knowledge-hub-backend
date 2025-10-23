@@ -129,8 +129,30 @@ class VectorStoreService
                 // Apply connector filter
                 if (isset($filter['connector_id'])) {
                     $connectorIds = $filter['connector_id']['$in'] ?? [$filter['connector_id']];
-                    $query->whereIn('documents.connector_id', $connectorIds);
-                    Log::info('📊 Applying connector filter', ['connector_ids' => $connectorIds]);
+                    
+                    // Handle null values (system documents) separately
+                    $hasNull = in_array(null, $connectorIds, true);
+                    $nonNullIds = array_filter($connectorIds, function($id) { return $id !== null; });
+                    
+                    if ($hasNull && !empty($nonNullIds)) {
+                        // Both null and non-null connectors
+                        $query->where(function($q) use ($nonNullIds) {
+                            $q->whereIn('documents.connector_id', $nonNullIds)
+                              ->orWhereNull('documents.connector_id');
+                        });
+                    } elseif ($hasNull) {
+                        // Only null connectors (system documents)
+                        $query->whereNull('documents.connector_id');
+                    } else {
+                        // Only non-null connectors
+                        $query->whereIn('documents.connector_id', $nonNullIds);
+                    }
+                    
+                    Log::info('📊 Applying connector filter', [
+                        'connector_ids' => $connectorIds,
+                        'has_null' => $hasNull,
+                        'non_null_ids' => $nonNullIds
+                    ]);
                 }
                 
                 // Apply source scope filter (organization vs personal)

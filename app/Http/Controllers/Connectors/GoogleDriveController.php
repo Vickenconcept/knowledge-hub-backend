@@ -72,7 +72,7 @@ class GoogleDriveController extends BaseConnectorController
 
         // For organization connections, add shared drive access
         if ($connector->connection_scope === 'organization') {
-            $scopes[] = 'https://www.googleapis.com/auth/drive.shared';
+            $scopes[] = 'https://www.googleapis.com/auth/drive';
         }
 
         $client->addScope($scopes);
@@ -84,6 +84,16 @@ class GoogleDriveController extends BaseConnectorController
             'workspace_name' => $connector->workspace_name,
         ]);
         $client->setState(base64_encode($state));
+
+        Log::info('🚀 GOOGLE DRIVE OAUTH STARTED', [
+            'connector_id' => $connector->id,
+            'connection_scope' => $connector->connection_scope,
+            'workspace_name' => $connector->workspace_name,
+            'user_id' => $user->id,
+            'org_id' => $orgId,
+            'enhanced_scopes' => $connector->connection_scope === 'organization' ? 'YES (shared drives)' : 'NO (personal only)',
+            'access_type' => $connector->connection_scope === 'personal' ? '👤 PERSONAL' : '🏢 ORGANIZATION'
+        ]);
 
         return response()->json([
             'connector_id' => $connector->id,
@@ -140,11 +150,14 @@ class GoogleDriveController extends BaseConnectorController
             return $this->redirectToFrontend(false, 'connector_not_found');
         }
 
-        Log::info('Google Drive OAuth callback processing', [
+        Log::info('🔗 GOOGLE DRIVE OAUTH CALLBACK STARTED', [
             'connector_id' => $connectorId,
             'connection_scope' => $connectionScope,
             'workspace_name' => $workspaceName,
-            'connector_scope' => $connector->connection_scope
+            'connector_scope' => $connector->connection_scope,
+            'user_id' => $userId ?? null,
+            'org_id' => $connector->org_id,
+            'enhanced_scopes' => $connector->connection_scope === 'organization' ? 'YES (shared drives)' : 'NO (personal only)'
         ]);
 
         try {
@@ -174,10 +187,17 @@ class GoogleDriveController extends BaseConnectorController
             $connector->status = 'connected';
             $connector->save();
 
-            Log::info('Google Drive connector updated successfully', [
+            Log::info('🎉 GOOGLE DRIVE CONNECTOR CONNECTED SUCCESSFULLY', [
                 'connector_id' => $connector->id,
                 'status' => $connector->status,
-                'has_tokens' => !empty($connector->encrypted_tokens)
+                'has_tokens' => !empty($connector->encrypted_tokens),
+                'connection_scope' => $connector->connection_scope,
+                'workspace_name' => $connector->workspace_name,
+                'access_type' => $connector->connection_scope === 'personal' ? '👤 PERSONAL WORKSPACE' : '🏢 ORGANIZATION WORKSPACE',
+                'workspace_access' => $connector->connection_scope === 'personal' 
+                    ? 'Personal files and folders only' 
+                    : 'Personal files + shared drives + team folders + external collaborations',
+                'enhanced_scopes' => $connector->connection_scope === 'organization' ? 'YES (shared drives enabled)' : 'NO (personal only)'
             ]);
 
             if ($request->isJson()) {

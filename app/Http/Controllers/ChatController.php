@@ -256,7 +256,16 @@ class ChatController extends Controller
                 $filteredChunks = [];
                 foreach ($chunks as $chunk) {
                     $connector = $chunk->document->connector ?? null;
+                    
+                    // System documents (connector_id = null) are accessible to all users
                     if (!$connector) {
+                        $filteredChunks[$chunk->id] = $chunk;
+                        Log::info('✅ System document access granted', [
+                            'user_id' => $user->id,
+                            'chunk_id' => $chunk->id,
+                            'document_id' => $chunk->document_id,
+                            'document_title' => $chunk->document->title ?? 'Unknown'
+                        ]);
                         continue;
                     }
                     
@@ -916,10 +925,11 @@ class ChatController extends Controller
         }
 
         if (!empty($accessibleConnectors)) {
-            $filter['connector_id'] = ['$in' => $accessibleConnectors];
+            // Include both accessible connectors AND system documents (connector_id = null)
+            $filter['connector_id'] = ['$in' => array_merge($accessibleConnectors, [null])];
         } else {
-            // No accessible connectors - return empty result
-            $filter['connector_id'] = ['$in' => []];
+            // Even if no connectors, include system documents for getting started guide
+            $filter['connector_id'] = ['$in' => [null]];
         }
 
         // Add workspace scope filtering
@@ -932,7 +942,7 @@ class ChatController extends Controller
             $filter['workspace_id'] = ['$in' => $workspaceIds];
         }
 
-        \Log::info('=== WORKSPACE FILTER BUILT ===', [
+        Log::info('=== WORKSPACE FILTER BUILT ===', [
             'user_id' => $userId,
             'org_id' => $orgId,
             'search_scope' => $searchScope,

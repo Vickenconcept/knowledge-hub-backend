@@ -81,6 +81,15 @@ class DropboxController extends BaseConnectorController
             'token_access_type' => 'offline', // Request refresh token
         ]);
 
+        Log::info('🚀 DROPBOX OAUTH STARTED', [
+            'connector_id' => $connector->id,
+            'connection_scope' => $connector->connection_scope,
+            'workspace_name' => $connector->workspace_name,
+            'user_id' => $user->id,
+            'org_id' => $orgId,
+            'access_type' => $connector->connection_scope === 'personal' ? '👤 PERSONAL' : '🏢 ORGANIZATION'
+        ]);
+
         return response()->json([
             'auth_url' => $authUrl,
             'state' => $state,
@@ -154,11 +163,11 @@ class DropboxController extends BaseConnectorController
                                    $accountInfo['email'] ?? 
                                    'Dropbox';
                     
-                    Log::info('Dropbox account info retrieved', [
-                        'account_name' => $accountName,
-                        'email' => $accountInfo['email'] ?? null,
-                        'account_info' => $accountInfo,
-                    ]);
+            Log::info('✅ DROPBOX ACCOUNT INFO RETRIEVED', [
+                'account_name' => $accountName,
+                'email' => $accountInfo['email'] ?? null,
+                'account_id' => $accountInfo['account_id'] ?? null,
+            ]);
                 } else {
                     Log::warning('Dropbox account info request failed', [
                         'status' => $accountResponse->status(),
@@ -198,11 +207,17 @@ class DropboxController extends BaseConnectorController
                 ]),
             ]);
 
-            Log::info('Dropbox connector created/updated', [
+            Log::info('🎉 DROPBOX CONNECTOR CONNECTED SUCCESSFULLY', [
                 'connector_id' => $connector->id,
                 'org_id' => $orgId,
                 'connection_scope' => $connector->connection_scope,
                 'workspace_name' => $connector->workspace_name,
+                'account_name' => $accountName,
+                'account_email' => $accountInfo['email'] ?? null,
+                'access_type' => $connector->connection_scope === 'personal' ? '👤 PERSONAL WORKSPACE' : '🏢 ORGANIZATION WORKSPACE',
+                'workspace_access' => $connector->connection_scope === 'personal' 
+                    ? 'Personal files and folders only' 
+                    : 'Personal files + shared folders + team folders + external collaborations'
             ]);
 
             return redirect(config('app.frontend_url') . '/connectors?dropbox_connected=true');
