@@ -179,9 +179,15 @@ class ManualUploadController extends BaseConnectorController
             ->where('type', 'manual_upload')
             ->where('connection_scope', $connectionScope);
             
-        // For personal scope, also check workspace name
-        if ($connectionScope === 'personal' && $workspaceName) {
-            $query->where('workspace_name', $workspaceName);
+        // For personal scope, also check workspace name AND user permissions
+        if ($connectionScope === 'personal') {
+            if ($workspaceName) {
+                $query->where('workspace_name', $workspaceName);
+            }
+            // CRITICAL: Check user permissions for personal connectors
+            $query->whereHas('userPermissions', function($q) use ($userId) {
+                $q->where('user_id', $userId);
+            });
         }
         
         $existingConnector = $query->first();
@@ -280,9 +286,15 @@ class ManualUploadController extends BaseConnectorController
             ->where('type', 'manual_upload')
             ->where('connection_scope', $connectionScope);
             
-        // For personal scope, also check workspace name
-        if ($connectionScope === 'personal' && $workspaceName) {
-            $query->where('workspace_name', $workspaceName);
+        // For personal scope, also check workspace name AND user permissions
+        if ($connectionScope === 'personal') {
+            if ($workspaceName) {
+                $query->where('workspace_name', $workspaceName);
+            }
+            // CRITICAL: Check user permissions for personal connectors
+            $query->whereHas('userPermissions', function($q) use ($userId) {
+                $q->where('user_id', $userId);
+            });
         }
         
         $connector = $query->first();
@@ -381,6 +393,7 @@ class ManualUploadController extends BaseConnectorController
                 $document = Document::create([
                     'org_id' => $orgId,
                     'connector_id' => $connector->id,
+                    'user_id' => $userId, // Track which user uploaded this document
                     'title' => $file->getClientOriginalName() ?: 'Untitled',
                     'source_url' => null,
                     'mime_type' => $mime,

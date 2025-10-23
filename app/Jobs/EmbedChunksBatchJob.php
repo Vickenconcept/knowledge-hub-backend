@@ -37,7 +37,9 @@ class EmbedChunksBatchJob implements ShouldQueue
                     'chunk_id' => (string) $chunk->id,
                     'document_id' => (string) $chunk->document_id,
                     'org_id' => (string) $this->orgId,
-                    'connector_id' => $chunk->document ? (string) $chunk->document->connector_id : null, // ✅ ADD THIS for source filtering!
+                    'connector_id' => $chunk->document ? (string) $chunk->document->connector_id : null,
+                    'source_scope' => $chunk->source_scope ?? 'organization',
+                    'workspace_name' => $chunk->workspace_name,
                     'char_start' => $chunk->char_start,
                     'char_end' => $chunk->char_end,
                 ],

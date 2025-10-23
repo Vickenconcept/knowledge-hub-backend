@@ -122,14 +122,29 @@ class VectorStoreService
                 ->whereNotNull('chunks.embedding')
                 ->select('chunks.id', 'chunks.document_id', 'chunks.org_id', 'chunks.embedding');
             
-            // Apply connector filter if provided (join with documents table)
-            if (!empty($filter) && isset($filter['connector_id'])) {
-                $connectorIds = $filter['connector_id']['$in'] ?? [$filter['connector_id']];
+            // Apply filters (join with documents table for filtering)
+            if (!empty($filter)) {
+                $query->join('documents', 'chunks.document_id', '=', 'documents.id');
                 
-                $query->join('documents', 'chunks.document_id', '=', 'documents.id')
-                    ->whereIn('documents.connector_id', $connectorIds);
+                // Apply connector filter
+                if (isset($filter['connector_id'])) {
+                    $connectorIds = $filter['connector_id']['$in'] ?? [$filter['connector_id']];
+                    $query->whereIn('documents.connector_id', $connectorIds);
+                    Log::info('📊 Applying connector filter', ['connector_ids' => $connectorIds]);
+                }
                 
-                Log::info('📊 Applying connector filter', ['connector_ids' => $connectorIds]);
+                // Apply source scope filter (organization vs personal)
+                if (isset($filter['source_scope'])) {
+                    $query->where('chunks.source_scope', $filter['source_scope']);
+                    Log::info('📊 Applying source scope filter', ['source_scope' => $filter['source_scope']]);
+                }
+                
+                // Apply workspace name filter
+                if (isset($filter['workspace_name'])) {
+                    $workspaceNames = $filter['workspace_name']['$in'] ?? [$filter['workspace_name']];
+                    $query->whereIn('chunks.workspace_name', $workspaceNames);
+                    Log::info('📊 Applying workspace name filter', ['workspace_names' => $workspaceNames]);
+                }
             }
             
             $chunks = $query->get();

@@ -17,10 +17,25 @@ class DocumentController extends Controller
     public function index(Request $request)
     {
         $orgId = $request->user()->org_id;
+        $userId = $request->user()->id;
         
-        // Exclude system documents (like getting started guide) from the documents list
-        // They're searchable in chat but shouldn't clutter the documents page
+        // Smart filtering: Show user's personal documents + organization documents
         $docs = Document::where('org_id', $orgId)
+            ->where(function($query) use ($userId) {
+                $query->where(function($q) use ($userId) {
+                    // User's personal documents (uploaded by this user)
+                    $q->where('user_id', $userId)
+                      ->whereHas('connector', function($connectorQuery) {
+                          $connectorQuery->where('connection_scope', 'personal');
+                      });
+                })
+                ->orWhere(function($q) {
+                    // Organization documents (accessible to all team members)
+                    $q->whereHas('connector', function($connectorQuery) {
+                        $connectorQuery->where('connection_scope', 'organization');
+                    });
+                });
+            })
             ->where(function($query) {
                 $query->where('doc_type', '!=', 'guide')
                       ->orWhereNull('doc_type');
@@ -68,6 +83,13 @@ class DocumentController extends Controller
                 'chunks_count' => $doc->chunks_count,
                 'created_at' => $doc->created_at,
                 'fetched_at' => $doc->fetched_at,
+                'scope' => $connector ? $connector->connection_scope : 'unknown',
+                'workspace_name' => $connector ? $connector->workspace_name : null,
+                'is_personal' => $connector ? $connector->connection_scope === 'personal' : false,
+                'is_organization' => $connector ? $connector->connection_scope === 'organization' : false,
+                'scope_label' => $connector ? ($connector->connection_scope === 'personal' ? 'Personal' : 'Organization') : 'Unknown',
+                'scope_icon' => $connector ? ($connector->connection_scope === 'personal' ? '👤' : '🏢') : '❓',
+                'uploaded_by' => $doc->user_id,
             ];
         });
         
@@ -88,9 +110,31 @@ class DocumentController extends Controller
     public function show(Request $request, string $id)
     {
         $orgId = $request->user()->org_id;
-        $doc = Document::where('org_id', $orgId)->where('id', $id)->first();
+        $userId = $request->user()->id;
+        
+        // Apply same security filtering as index method
+        $doc = Document::where('org_id', $orgId)
+            ->where('id', $id)
+            ->where(function($query) use ($userId) {
+                $query->where(function($q) use ($userId) {
+                    // User's personal documents (uploaded by this user)
+                    $q->where('user_id', $userId)
+                      ->whereHas('connector', function($connectorQuery) {
+                          $connectorQuery->where('connection_scope', 'personal');
+                      });
+                })
+                ->orWhere(function($q) {
+                    // Organization documents (accessible to all team members)
+                    $q->whereHas('connector', function($connectorQuery) {
+                        $connectorQuery->where('connection_scope', 'organization');
+                    });
+                });
+            })
+            ->with('connector')
+            ->first();
+            
         if (!$doc) {
-            return response()->json(['error' => 'Document not found'], 404);
+            return response()->json(['error' => 'Document not found or access denied'], 404);
         }
         return response()->json($doc);
     }
@@ -98,9 +142,30 @@ class DocumentController extends Controller
     public function chunks(Request $request, string $id)
     {
         $orgId = $request->user()->org_id;
-        $doc = Document::where('org_id', $orgId)->where('id', $id)->first();
+        $userId = $request->user()->id;
+        
+        // Apply same security filtering as index method
+        $doc = Document::where('org_id', $orgId)
+            ->where('id', $id)
+            ->where(function($query) use ($userId) {
+                $query->where(function($q) use ($userId) {
+                    // User's personal documents (uploaded by this user)
+                    $q->where('user_id', $userId)
+                      ->whereHas('connector', function($connectorQuery) {
+                          $connectorQuery->where('connection_scope', 'personal');
+                      });
+                })
+                ->orWhere(function($q) {
+                    // Organization documents (accessible to all team members)
+                    $q->whereHas('connector', function($connectorQuery) {
+                        $connectorQuery->where('connection_scope', 'organization');
+                    });
+                });
+            })
+            ->first();
+            
         if (!$doc) {
-            return response()->json(['error' => 'Document not found'], 404);
+            return response()->json(['error' => 'Document not found or access denied'], 404);
         }
         $chunks = Chunk::where('document_id', $doc->id)
             ->select('id', 'document_id', 'org_id', 'chunk_index', 'text', 'char_start', 'char_end', 'token_count', 'created_at', 'updated_at')

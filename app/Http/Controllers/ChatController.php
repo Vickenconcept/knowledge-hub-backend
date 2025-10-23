@@ -224,6 +224,15 @@ class ChatController extends Controller
                 
                 $matches = $vectorStore->query($embedding, $topK, $orgId, $orgId, $conversation->id, $pineconeFilter);
             $chunkIds = array_map(fn($m) => $m['id'], $matches);
+            
+            Log::info('🔍 Vector search results', [
+                'user_id' => $user->id,
+                'org_id' => $orgId,
+                'search_scope' => $searchScope,
+                'pinecone_filter' => $pineconeFilter,
+                'matches_count' => count($matches),
+                'chunk_ids' => $chunkIds
+            ]);
 
             if (empty($chunkIds)) {
                 return response()->json([
@@ -235,13 +244,44 @@ class ChatController extends Controller
                     ]);
                 }
 
-                // 3. Fetch chunk rows
+                // 3. Fetch chunk rows with SECURITY FILTERING
                 $chunks = Chunk::whereIn('id', $chunkIds)
                     ->with(['document' => function($q) {
                         $q->select('id', 'title', 'source_url', 's3_path', 'org_id', 'connector_id', 'doc_type', 'tags', 'metadata');
-                    }, 'document.connector'])
+                    }, 'document.connector.userPermissions'])
                     ->get()
                     ->keyBy('id');
+                
+                // CRITICAL SECURITY: Filter chunks by user permissions
+                $filteredChunks = [];
+                foreach ($chunks as $chunk) {
+                    $connector = $chunk->document->connector ?? null;
+                    if (!$connector) {
+                        continue;
+                    }
+                    
+                    // Check user access to this chunk's document
+                    if (self::userHasAccessToChunk($connector, $user->id)) {
+                        $filteredChunks[$chunk->id] = $chunk;
+                    } else {
+                        Log::info('🚫 User denied access to chunk', [
+                            'user_id' => $user->id,
+                            'chunk_id' => $chunk->id,
+                            'document_id' => $chunk->document_id,
+                            'connector_id' => $connector->id,
+                            'connection_scope' => $connector->connection_scope
+                        ]);
+                    }
+                }
+                
+                $chunks = $filteredChunks;
+                
+                Log::info('🔒 Security filtering results', [
+                    'user_id' => $user->id,
+                    'original_chunks' => count($chunkIds),
+                    'filtered_chunks' => count($filteredChunks),
+                    'access_denied_count' => count($chunkIds) - count($filteredChunks)
+                ]);
 
                 // Build an ordered snippets array based on matches
             foreach ($matches as $m) {
@@ -289,6 +329,35 @@ class ChatController extends Controller
                 'response_style' => $responseStyle,
                 'query' => $queryText
             ]);
+            
+            // Intelligent name matching for person queries
+            $nameMatchingResult = null;
+            if (self::isPersonQuery($queryText)) {
+                $nameMatchingResult = \App\Services\NameMatchingService::findNameMatches($queryText, $snippets, $orgId, $user->id);
+                
+                // If no exact match found, provide intelligent response
+                if ($nameMatchingResult['no_matches'] || $nameMatchingResult['confidence'] < 0.8) {
+                    $intelligentResponse = \App\Services\NameMatchingService::generateIntelligentResponse($nameMatchingResult, $queryText);
+                    
+                    // Create a message with the intelligent response
+                    Message::create([
+                        'conversation_id' => $conversation->id,
+                        'role' => 'assistant',
+                        'content' => $intelligentResponse,
+                        'sources' => [],
+                    ]);
+                    
+                    return response()->json([
+                        'answer' => $intelligentResponse,
+                        'sources' => [],
+                        'query' => $queryText,
+                        'result_count' => 0,
+                        'conversation_id' => $conversation->id,
+                        'route_type' => 'intelligent_name_matching',
+                        'name_matching' => $nameMatchingResult,
+                    ]);
+                }
+            }
             
             // Get enhanced context based on routing decision
             $enhancedContext = \App\Services\ContextRouter::buildEnhancedContext($routing, $conversation->id, $conversationHistory);
@@ -868,10 +937,65 @@ class ChatController extends Controller
             'org_id' => $orgId,
             'search_scope' => $searchScope,
             'accessible_connectors' => $accessibleConnectors,
-            'filter' => $filter
+            'filter' => $filter,
+            'workspace_ids' => $workspaceIds
         ]);
 
         return !empty($filter) ? $filter : null;
+    }
+
+    /**
+     * CRITICAL SECURITY: Check if user has access to a chunk
+     */
+    private function userHasAccessToChunk($connector, string $userId): bool
+    {
+        // Organization connectors: accessible to all org members
+        if ($connector->connection_scope === 'organization') {
+            return true;
+        }
+        
+        // Personal connectors: only accessible to users with explicit permissions
+        if ($connector->connection_scope === 'personal') {
+            return $connector->userPermissions()
+                ->where('user_id', $userId)
+                ->exists();
+        }
+        
+        // Default: deny access for unknown scopes
+        return false;
+    }
+
+    /**
+     * Check if query is asking about a person
+     */
+    private function isPersonQuery(string $query): bool
+    {
+        $query = strtolower(trim($query));
+        
+        // Patterns that indicate person queries
+        $personPatterns = [
+            '/\btell\s+me\s+about\s+([a-z\s]+)/',
+            '/\bwho\s+is\s+([a-z\s]+)/',
+            '/\bwhat\s+about\s+([a-z\s]+)/',
+            '/\b([a-z\s]+)\s+background/',
+            '/\b([a-z\s]+)\s+experience/',
+            '/\b([a-z\s]+)\s+skills/',
+            '/\b([a-z\s]+)\s+education/',
+            '/\b([a-z\s]+)\s+qualification/',
+        ];
+        
+        foreach ($personPatterns as $pattern) {
+            if (preg_match($pattern, $query)) {
+                return true;
+            }
+        }
+        
+        // Check if query contains what looks like a person's name (2-3 words, proper case)
+        if (preg_match('/\b([A-Z][a-z]+\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b/', $query)) {
+            return true;
+        }
+        
+        return false;
     }
 
     /**

@@ -418,7 +418,8 @@ class IngestConnectorJob implements ShouldQueue
                         $this->orgId,
                         $document->id,
                         $this->connectorId,
-                        $job->id
+                        $job->id, // ingestJobId
+                        $document->user_id // userId
                     );
                 } else {
                     Log::info("Document already tracked for quota, skipping: " . $document->title, [
@@ -706,6 +707,7 @@ class IngestConnectorJob implements ShouldQueue
                             'id' => (string) \Illuminate\Support\Str::uuid(),
                             'org_id' => $this->orgId,
                             'connector_id' => $connector->id,
+                            'user_id' => $connector->getPrimaryUser(), // Track which user owns this connector
                             'title' => $pageTitle,
                             'source_url' => $pageUrl,
                             'mime_type' => 'application/vnd.notion.page',
@@ -723,7 +725,8 @@ class IngestConnectorJob implements ShouldQueue
                             $this->orgId,
                             $document->id,
                             $this->connectorId,
-                            $job->id
+                            $job->id, // ingestJobId
+                            $document->user_id // userId
                         );
                         
                         Log::info("✅ Notion document created in DB", [
@@ -1114,6 +1117,7 @@ class IngestConnectorJob implements ShouldQueue
                             'id' => (string) \Illuminate\Support\Str::uuid(),
                     'org_id' => $this->orgId,
                     'connector_id' => $connector->id,
+                            'user_id' => $connector->getPrimaryUser(), // Track which user owns this connector
                             'title' => $file->getName(),
                             'source_url' => $file->getWebViewLink(),
                             'mime_type' => $file->getMimeType(),
@@ -1133,7 +1137,8 @@ class IngestConnectorJob implements ShouldQueue
                             $this->orgId,
                             $document->id,
                             $this->connectorId,
-                            $job->id
+                            $job->id, // ingestJobId
+                            $document->user_id // userId
                         );
                         
                         Log::info("✅ Document created in DB", [
@@ -1260,7 +1265,9 @@ class IngestConnectorJob implements ShouldQueue
                             'chunk_id' => $chunk->id,
                             'document_id' => $chunk->document_id,
                             'org_id' => $chunk->org_id,
-                            'connector_id' => $this->connectorId, // ✅ ADD THIS for source filtering!
+                            'connector_id' => $this->connectorId,
+                            'source_scope' => $chunk->source_scope ?? 'organization',
+                            'workspace_name' => $chunk->workspace_name,
                         ]
                     ];
                 }
@@ -1583,6 +1590,7 @@ class IngestConnectorJob implements ShouldQueue
                             'id' => (string) \Illuminate\Support\Str::uuid(),
                             'org_id' => $this->orgId,
                             'connector_id' => $connector->id,
+                            'user_id' => $connector->getPrimaryUser(), // Track which user owns this connector
                             'title' => $file['name'],
                             'source_url' => $dropboxSourceUrl,
                             'mime_type' => $file['mime_type'],
@@ -1600,7 +1608,8 @@ class IngestConnectorJob implements ShouldQueue
                             $this->orgId,
                             $document->id,
                             $this->connectorId,
-                            $job->id
+                            $job->id, // ingestJobId
+                            $document->user_id // userId
                         );
                         
                         Log::info("✅ Document created in DB", [
@@ -2419,6 +2428,7 @@ class IngestConnectorJob implements ShouldQueue
             $document = \App\Models\Document::create([
                 'org_id' => $this->orgId,
                 'connector_id' => $this->connectorId,
+                'user_id' => $connector->getPrimaryUser(), // Track which user owns this connector
                 'external_id' => $externalId,
                 'title' => $newTitle,
                 'source_url' => $permalink,
@@ -2834,6 +2844,7 @@ class IngestConnectorJob implements ShouldQueue
                     $fileDocument = \App\Models\Document::create([
                         'org_id' => $this->orgId,
                         'connector_id' => $this->connectorId,
+                        'user_id' => $connector->getPrimaryUser(), // Track which user owns this connector
                         'external_id' => 'slack_file_' . $fileId,
                         'title' => $fileName,
                         'source_url' => $fileUrl,
