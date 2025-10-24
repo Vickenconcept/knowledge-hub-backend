@@ -246,8 +246,9 @@ class ChatController extends Controller
 
                 // 3. Fetch chunk rows with SECURITY FILTERING
                 $chunks = Chunk::whereIn('id', $chunkIds)
+                    ->select('id', 'document_id', 'org_id', 'chunk_index', 'text', 'char_start', 'char_end', 'token_count', 'source_scope', 'workspace_name')
                     ->with(['document' => function($q) {
-                        $q->select('id', 'title', 'source_url', 's3_path', 'org_id', 'connector_id', 'doc_type', 'tags', 'metadata');
+                        $q->select('id', 'title', 'source_url', 's3_path', 'org_id', 'connector_id', 'doc_type', 'tags', 'metadata', 'source_scope', 'user_id');
                     }, 'document.connector.userPermissions'])
                     ->get()
                     ->keyBy('id');
@@ -269,8 +270,8 @@ class ChatController extends Controller
                         continue;
                     }
                     
-                    // Check user access to this chunk's document
-                    if (self::userHasAccessToChunk($connector, $user->id)) {
+                    // Check user access to this chunk's document based on DOCUMENT source_scope
+                    if (self::userHasAccessToChunkByDocumentScope($chunk, $user->id)) {
                         $filteredChunks[$chunk->id] = $chunk;
                     } else {
                         Log::info('🚫 User denied access to chunk', [
@@ -278,7 +279,8 @@ class ChatController extends Controller
                             'chunk_id' => $chunk->id,
                             'document_id' => $chunk->document_id,
                             'connector_id' => $connector->id,
-                            'connection_scope' => $connector->connection_scope
+                            'chunk_source_scope' => $chunk->source_scope,
+                            'document_source_scope' => $chunk->document->source_scope ?? 'unknown'
                         ]);
                     }
                 }
@@ -345,7 +347,7 @@ class ChatController extends Controller
                 $nameMatchingResult = \App\Services\NameMatchingService::findNameMatches($queryText, $snippets, $orgId, $user->id);
                 
                 // If no exact match found, provide intelligent response
-                if ($nameMatchingResult['no_matches'] || $nameMatchingResult['confidence'] < 0.8) {
+                if ($nameMatchingResult['no_matches'] || $nameMatchingResult['confidence'] < 0.5) {
                     $intelligentResponse = \App\Services\NameMatchingService::generateIntelligentResponse($nameMatchingResult, $queryText);
                     
                     // Create a message with the intelligent response
@@ -897,7 +899,10 @@ class ChatController extends Controller
     {
         $filter = [];
 
-        // Get all connectors accessible to this user
+        // NEW APPROACH: Filter by document source_scope instead of connector scope
+        // This allows individual documents to be shared regardless of their connector
+        
+        // Get all connectors accessible to this user (for security)
         $accessibleConnectors = [];
         
         // Always include organization connectors (accessible to all org members)
@@ -910,13 +915,19 @@ class ChatController extends Controller
 
         // Apply search scope filtering
         if ($searchScope === 'organization') {
-            // Only organization connectors
-            $accessibleConnectors = $orgConnectors;
+            // For organization scope: include ALL connectors in the org (for shared documents)
+            // plus user's accessible connectors (for security)
+            $allOrgConnectors = \App\Models\Connector::where('org_id', $orgId)->pluck('id')->toArray();
+            $accessibleConnectors = array_unique(array_merge($allOrgConnectors, $accessibleConnectors));
         } elseif ($searchScope === 'personal') {
             // Only personal connectors that user has access to
             $accessibleConnectors = $personalConnectors;
+        } else {
+            // For 'both' scope: include ALL connectors in the org (for shared documents)
+            // plus user's accessible connectors (for security)
+            $allOrgConnectors = \App\Models\Connector::where('org_id', $orgId)->pluck('id')->toArray();
+            $accessibleConnectors = array_unique(array_merge($allOrgConnectors, $accessibleConnectors));
         }
-        // For 'both' scope, use all accessible connectors (already merged above)
 
         // Add connector filtering
         if (!empty($connectorIds)) {
@@ -932,9 +943,18 @@ class ChatController extends Controller
             $filter['connector_id'] = ['$in' => [null]];
         }
 
-        // Add workspace scope filtering
-        if ($searchScope !== 'both') {
-            $filter['source_scope'] = $searchScope;
+        // CRITICAL: Add source_scope filtering based on user access
+        if ($searchScope === 'organization') {
+            // Only organization-scoped documents
+            $filter['source_scope'] = 'organization';
+        } elseif ($searchScope === 'personal') {
+            // Only personal-scoped documents that user owns
+            $filter['source_scope'] = 'personal';
+            $filter['user_id'] = $userId; // Only documents uploaded by this user
+        } else {
+            // For 'both' scope: organization docs for all + personal docs for this user
+            // Pass user_id to VectorStoreService to handle mixed scope filtering
+            $filter['user_id'] = $userId;
         }
 
         // Add specific workspace filtering
@@ -955,7 +975,45 @@ class ChatController extends Controller
     }
 
     /**
-     * CRITICAL SECURITY: Check if user has access to a chunk
+     * CRITICAL SECURITY: Check if user has access to a chunk based on DOCUMENT source_scope
+     */
+    private function userHasAccessToChunkByDocumentScope($chunk, string $userId): bool
+    {
+        // Organization-scoped documents: accessible to all org members
+        if ($chunk->source_scope === 'organization') {
+            Log::info('✅ Organization document access granted', [
+                'user_id' => $userId,
+                'chunk_id' => $chunk->id,
+                'chunk_source_scope' => $chunk->source_scope
+            ]);
+            return true;
+        }
+        
+        // Personal-scoped documents: only accessible to the user who uploaded them
+        if ($chunk->source_scope === 'personal') {
+            $hasAccess = $chunk->document && $chunk->document->user_id == $userId;
+            Log::info('🔍 Personal document access check', [
+                'user_id' => $userId,
+                'chunk_id' => $chunk->id,
+                'chunk_source_scope' => $chunk->source_scope,
+                'document_user_id' => $chunk->document ? $chunk->document->user_id : 'no_document',
+                'has_access' => $hasAccess
+            ]);
+            return $hasAccess;
+        }
+        
+        // Default: deny access for unknown scopes
+        Log::info('🚫 Unknown scope - access denied', [
+            'user_id' => $userId,
+            'chunk_id' => $chunk->id,
+            'chunk_source_scope' => $chunk->source_scope
+        ]);
+        return false;
+    }
+
+    /**
+     * LEGACY: Check if user has access to a chunk based on connector scope
+     * @deprecated Use userHasAccessToChunkByDocumentScope instead
      */
     private function userHasAccessToChunk($connector, string $userId): bool
     {

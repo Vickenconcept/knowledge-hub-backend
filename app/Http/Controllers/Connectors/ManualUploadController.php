@@ -403,6 +403,8 @@ class ManualUploadController extends BaseConnectorController
                     'fetched_at' => now(),
                     'doc_type' => $classification['doc_type'],
                     'tags' => $classification['tags'],
+                    'source_scope' => $connectionScope, // Use the connection scope from the request
+                    'workspace_name' => $workspaceName,
                     'metadata' => array_merge([
                         'upload_type' => 'manual',
                         'uploaded_by' => $user->id,
@@ -412,6 +414,22 @@ class ManualUploadController extends BaseConnectorController
                         'tmp_path' => $tmpPath, // Keep temp path for ingestion job
                         'extracted_text' => $extractedText, // Store extracted text for reuse
                     ], $classification['metadata'])
+                ]);
+                
+                // Refresh the document from database to get the actual saved values
+                $document->refresh();
+                
+                Log::info('📄 MANUAL UPLOAD DOCUMENT CREATED IN DATABASE', [
+                    'document_id' => $document->id,
+                    'title' => $file->getClientOriginalName(),
+                    'connector_id' => $connector->id,
+                    'connector_scope' => $connector->connection_scope,
+                    'document_source_scope' => $document->source_scope,
+                    'workspace_name' => $workspaceName,
+                    'user_id' => $userId,
+                    'connection_scope_request' => $connectionScope,
+                    'connection_scope_variable' => $connectionScope,
+                    'document_created_with_scope' => $connectionScope
                 ]);
 
                 // Defer processing to a single ingestion job (like Google Drive)

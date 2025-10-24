@@ -159,6 +159,16 @@ class VectorStoreService
                 if (isset($filter['source_scope'])) {
                     $query->where('chunks.source_scope', $filter['source_scope']);
                     Log::info('📊 Applying source scope filter', ['source_scope' => $filter['source_scope']]);
+                } elseif (isset($filter['user_id'])) {
+                    // For 'both' scope: include organization docs for all + personal docs for this user
+                    $query->where(function($q) use ($filter) {
+                        $q->where('chunks.source_scope', 'organization')
+                          ->orWhere(function($subQ) use ($filter) {
+                              $subQ->where('chunks.source_scope', 'personal')
+                                   ->where('documents.user_id', $filter['user_id']);
+                          });
+                    });
+                    Log::info('📊 Applying mixed scope filter', ['user_id' => $filter['user_id']]);
                 }
                 
                 // Apply workspace name filter

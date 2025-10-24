@@ -35,6 +35,8 @@ class CreateChunksJob implements ShouldQueue
                 'char_start' => $part['char_start'],
                 'char_end' => $part['char_end'],
                 'token_count' => 0,
+                'source_scope' => $document->source_scope ?? 'personal', // Inherit from document
+                'workspace_name' => $document->workspace_name,
             ]);
             $chunkIds[] = $chunk->id;
         }

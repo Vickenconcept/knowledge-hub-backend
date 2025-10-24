@@ -234,7 +234,41 @@ class NameMatchingService
         }
         
         if (!empty($partialMatches)) {
-            return 0.6; // Partial match
+            // Calculate more intelligent confidence based on name similarity
+            $requestedWords = explode(' ', strtolower($requestedName));
+            $bestMatch = '';
+            $bestScore = 0.0;
+            
+            foreach ($partialMatches as $match) {
+                $matchWords = explode(' ', strtolower($match));
+                $score = 0.0;
+                $matchedWords = 0;
+                
+                foreach ($requestedWords as $requestedWord) {
+                    foreach ($matchWords as $matchWord) {
+                        if (strlen($requestedWord) > 2 && strlen($matchWord) > 2) {
+                            if ($requestedWord === $matchWord) {
+                                $score += 1.0;
+                                $matchedWords++;
+                            } elseif (str_contains($matchWord, $requestedWord) || str_contains($requestedWord, $matchWord)) {
+                                $score += 0.8;
+                                $matchedWords++;
+                            }
+                        }
+                    }
+                }
+                
+                if ($matchedWords > 0) {
+                    $score = $score / count($requestedWords);
+                    if ($score > $bestScore) {
+                        $bestScore = $score;
+                        $bestMatch = $match;
+                    }
+                }
+            }
+            
+            // Return higher confidence for better matches
+            return min(0.9, max(0.6, $bestScore));
         }
         
         return 0.0; // No match
@@ -285,6 +319,7 @@ class NameMatchingService
             
             // Get document with connector information
             $document = \App\Models\Document::with('connector.userPermissions')
+                ->select('id', 'org_id', 'connector_id', 'user_id', 'source_scope', 'title')
                 ->where('id', $documentId)
                 ->where('org_id', $orgId)
                 ->first();
@@ -298,15 +333,15 @@ class NameMatchingService
                 continue;
             }
             
-            // Check user access to this document
-            if (self::userHasAccessToDocument($connector, $userId)) {
+            // Check user access to this document based on DOCUMENT source_scope
+            if (self::userHasAccessToDocumentByScope($document, $userId)) {
                 $filteredSnippets[] = $snippet;
             } else {
                 Log::info('🚫 User denied access to document', [
                     'user_id' => $userId,
                     'document_id' => $documentId,
                     'connector_id' => $connector->id,
-                    'connection_scope' => $connector->connection_scope
+                    'document_source_scope' => $document->source_scope ?? 'unknown'
                 ]);
             }
         }
@@ -315,7 +350,45 @@ class NameMatchingService
     }
     
     /**
-     * Check if user has access to a document based on connector permissions
+     * Check if user has access to a document based on DOCUMENT source_scope
+     */
+    private static function userHasAccessToDocumentByScope($document, string $userId): bool
+    {
+        // Organization-scoped documents: accessible to all org members
+        if ($document->source_scope === 'organization') {
+            Log::info('✅ Organization document access granted (name matching)', [
+                'user_id' => $userId,
+                'document_id' => $document->id,
+                'document_source_scope' => $document->source_scope
+            ]);
+            return true;
+        }
+        
+        // Personal-scoped documents: only accessible to the user who uploaded them
+        if ($document->source_scope === 'personal') {
+            $hasAccess = $document->user_id == $userId;
+            Log::info('🔍 Personal document access check (name matching)', [
+                'user_id' => $userId,
+                'document_id' => $document->id,
+                'document_source_scope' => $document->source_scope,
+                'document_user_id' => $document->user_id,
+                'has_access' => $hasAccess
+            ]);
+            return $hasAccess;
+        }
+        
+        // Default: deny access for unknown scopes
+        Log::info('🚫 Unknown scope - access denied (name matching)', [
+            'user_id' => $userId,
+            'document_id' => $document->id,
+            'document_source_scope' => $document->source_scope
+        ]);
+        return false;
+    }
+
+    /**
+     * LEGACY: Check if user has access to a document based on connector permissions
+     * @deprecated Use userHasAccessToDocumentByScope instead
      */
     private static function userHasAccessToDocument($connector, string $userId): bool
     {

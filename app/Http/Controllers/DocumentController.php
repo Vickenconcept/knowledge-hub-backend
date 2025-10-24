@@ -23,17 +23,13 @@ class DocumentController extends Controller
         $docs = Document::where('org_id', $orgId)
             ->where(function($query) use ($userId) {
                 $query->where(function($q) use ($userId) {
-                    // User's personal documents (uploaded by this user)
+                    // User's personal documents (uploaded by this user with personal scope)
                     $q->where('user_id', $userId)
-                      ->whereHas('connector', function($connectorQuery) {
-                          $connectorQuery->where('connection_scope', 'personal');
-                      });
+                      ->where('source_scope', 'personal');
                 })
                 ->orWhere(function($q) {
                     // Organization documents (accessible to all team members)
-                    $q->whereHas('connector', function($connectorQuery) {
-                        $connectorQuery->where('connection_scope', 'organization');
-                    });
+                    $q->where('source_scope', 'organization');
                 });
             })
             ->where(function($query) {
@@ -117,17 +113,13 @@ class DocumentController extends Controller
             ->where('id', $id)
             ->where(function($query) use ($userId) {
                 $query->where(function($q) use ($userId) {
-                    // User's personal documents (uploaded by this user)
+                    // User's personal documents (uploaded by this user with personal scope)
                     $q->where('user_id', $userId)
-                      ->whereHas('connector', function($connectorQuery) {
-                          $connectorQuery->where('connection_scope', 'personal');
-                      });
+                      ->where('source_scope', 'personal');
                 })
                 ->orWhere(function($q) {
                     // Organization documents (accessible to all team members)
-                    $q->whereHas('connector', function($connectorQuery) {
-                        $connectorQuery->where('connection_scope', 'organization');
-                    });
+                    $q->where('source_scope', 'organization');
                 });
             })
             ->with('connector')
@@ -149,17 +141,13 @@ class DocumentController extends Controller
             ->where('id', $id)
             ->where(function($query) use ($userId) {
                 $query->where(function($q) use ($userId) {
-                    // User's personal documents (uploaded by this user)
+                    // User's personal documents (uploaded by this user with personal scope)
                     $q->where('user_id', $userId)
-                      ->whereHas('connector', function($connectorQuery) {
-                          $connectorQuery->where('connection_scope', 'personal');
-                      });
+                      ->where('source_scope', 'personal');
                 })
                 ->orWhere(function($q) {
                     // Organization documents (accessible to all team members)
-                    $q->whereHas('connector', function($connectorQuery) {
-                        $connectorQuery->where('connection_scope', 'organization');
-                    });
+                    $q->where('source_scope', 'organization');
                 });
             })
             ->first();
@@ -299,10 +287,12 @@ class DocumentController extends Controller
         $request->validate([
             'file' => 'required|file',
             'title' => 'nullable|string',
+            'source_scope' => 'nullable|in:personal,organization',
         ]);
 
         $user = $request->user();
         $orgId = $user->org_id;
+        $sourceScope = $request->input('source_scope', 'personal'); // Default to personal if not specified
         
         // CHECK DOCUMENT LIMIT BEFORE UPLOAD
         $docLimit = \App\Services\UsageLimitService::canAddDocument($orgId);
@@ -332,6 +322,7 @@ class DocumentController extends Controller
         $doc = Document::create([
             'org_id' => $orgId,
             'connector_id' => null,
+            'user_id' => $user->id, // Track which user uploaded this document
             'title' => $request->input('title') ?? ($file->getClientOriginalName() ?: 'Untitled'),
             'source_url' => null,
             'mime_type' => $mime,
@@ -339,6 +330,19 @@ class DocumentController extends Controller
             'size' => $file->getSize(),
             's3_path' => $upload['secure_url'] ?? null,
             'fetched_at' => now(),
+            'source_scope' => $sourceScope, // Use the scope from the request
+        ]);
+        
+        Log::info('📄 DIRECT UPLOAD DOCUMENT CREATED IN DATABASE', [
+            'document_id' => $doc->id,
+            'title' => $doc->title,
+            'connector_id' => null,
+            'connector_scope' => 'no_connector',
+            'document_source_scope' => $doc->source_scope,
+            'requested_scope' => $sourceScope,
+            'workspace_name' => null,
+            'user_id' => $user->id,
+            'upload_type' => 'direct'
         ]);
 
         $text = $extractor->extractText($tmpPath, $mime);
@@ -409,10 +413,10 @@ class DocumentController extends Controller
         ]);
 
         // Only allow changing from personal to organization
-        if ($document->connector && $document->connector->connection_scope === 'organization') {
+        if ($document->source_scope === 'organization') {
             Log::warning('⚠️ ALREADY ORGANIZATION SCOPE', [
                 'document_id' => $id,
-                'current_scope' => $document->connector->connection_scope
+                'current_scope' => $document->source_scope
             ]);
             return response()->json([
                 'error' => 'Document is already in organization scope'
@@ -428,44 +432,76 @@ class DocumentController extends Controller
             'connector_id' => $document->connector ? $document->connector->id : 'no_connector'
         ]);
 
-        // Update the connector scope - this affects ALL documents from this connector
-        if ($document->connector) {
-            $oldConnectorScope = $document->connector->connection_scope;
-            $document->connector->update([
-                'connection_scope' => $newScope
-            ]);
-            
-            Log::info('🔗 CONNECTOR UPDATED - AFFECTS ALL DOCUMENTS', [
-                'connector_id' => $document->connector->id,
-                'old_scope' => $oldConnectorScope,
-                'new_scope' => $newScope,
-                'reason' => 'Connector scope change affects all documents from this connector'
-            ]);
-            
-            // Update ALL documents from this connector to match the new scope
-            $allDocumentsFromConnector = Document::where('connector_id', $document->connector->id)->get();
-            $updatedDocumentsCount = 0;
-            
-            foreach ($allDocumentsFromConnector as $doc) {
-                $doc->update(['source_scope' => $newScope]);
-                $updatedDocumentsCount++;
-                
-                // Update all chunks for this document
-                Chunk::where('document_id', $doc->id)->update(['source_scope' => $newScope]);
-            }
-            
-            Log::info('📄 ALL DOCUMENTS FROM CONNECTOR UPDATED', [
-                'connector_id' => $document->connector->id,
-                'documents_updated' => $updatedDocumentsCount,
-                'new_scope' => $newScope
-            ]);
-        }
-
-        // Note: Document and chunks are already updated above when updating all documents from connector
-        Log::info('📝 INDIVIDUAL DOCUMENT SCOPE UPDATE COMPLETED', [
+        // Individual document scope update - only affects this specific document
+        Log::info('📝 INDIVIDUAL DOCUMENT SCOPE UPDATE', [
             'document_id' => $id,
-            'reason' => 'Document and chunks updated as part of connector scope change'
+            'connector_id' => $document->connector ? $document->connector->id : 'no_connector',
+            'reason' => 'Individual document scope change - does not affect connector or other documents'
         ]);
+
+        // Update document source_scope and workspace_name
+        $oldDocumentScope = $document->source_scope;
+        $updateData = [
+            'source_scope' => $newScope
+        ];
+        
+        // When sharing to organization, update workspace_name to reflect organization-wide access
+        if ($newScope === 'organization') {
+            $updateData['workspace_name'] = 'Organization Shared';
+        }
+        
+        $document->update($updateData);
+
+        Log::info('📄 DOCUMENT UPDATED', [
+            'document_id' => $id,
+            'old_scope' => $oldDocumentScope,
+            'new_scope' => $newScope
+        ]);
+
+        // Update all related chunks
+        $chunkUpdateData = [
+            'source_scope' => $newScope
+        ];
+        
+        // When sharing to organization, update workspace_name to reflect organization-wide access
+        if ($newScope === 'organization') {
+            $chunkUpdateData['workspace_name'] = 'Organization Shared';
+        }
+        
+        $updatedChunks = Chunk::where('document_id', $id)->update($chunkUpdateData);
+
+        Log::info('🧩 CHUNKS UPDATED', [
+            'document_id' => $id,
+            'chunks_updated' => $updatedChunks,
+            'total_chunks' => $chunksCount
+        ]);
+
+        // CRITICAL: Re-embed chunks with new source_scope metadata
+        // This ensures the vector store has the correct scope information
+        if ($newScope === 'organization') {
+            Log::info('🔄 RE-EMBEDDING CHUNKS FOR ORGANIZATION SCOPE', [
+                'document_id' => $id,
+                'chunks_count' => $chunksCount,
+                'reason' => 'Document shared to organization - updating vector store metadata'
+            ]);
+            
+            // Get all chunks for this document
+            $chunks = Chunk::where('document_id', $id)->get();
+            
+            if ($chunks->isNotEmpty()) {
+                // Dispatch re-embedding job to update vector store metadata
+                \App\Jobs\EmbedChunksBatchJob::dispatch(
+                    $chunks->pluck('id')->toArray(),
+                    $orgId
+                );
+                
+                Log::info('✅ RE-EMBEDDING JOB DISPATCHED', [
+                    'document_id' => $id,
+                    'chunk_ids' => $chunks->pluck('id')->toArray(),
+                    'org_id' => $orgId
+                ]);
+            }
+        }
 
         // Verify the update
         $updatedDocument = Document::where('id', $id)->with('connector')->first();
@@ -562,9 +598,16 @@ class DocumentController extends Controller
 
             // For bulk updates, we update each document individually
             // This allows documents from different connectors to be updated separately
-            $document->update([
+            $updateData = [
                 'source_scope' => $newScope
-            ]);
+            ];
+            
+            // When sharing to organization, update workspace_name to reflect organization-wide access
+            if ($newScope === 'organization') {
+                $updateData['workspace_name'] = 'Organization Shared';
+            }
+            
+            $document->update($updateData);
 
             Log::info('📄 BULK DOCUMENT UPDATED', [
                 'document_id' => $document->id,
@@ -574,15 +617,48 @@ class DocumentController extends Controller
 
             // Update all related chunks
             $chunksCount = Chunk::where('document_id', $document->id)->count();
-            $updatedChunks = Chunk::where('document_id', $document->id)->update([
+            $chunkUpdateData = [
                 'source_scope' => $newScope
-            ]);
+            ];
+            
+            // When sharing to organization, update workspace_name to reflect organization-wide access
+            if ($newScope === 'organization') {
+                $chunkUpdateData['workspace_name'] = 'Organization Shared';
+            }
+            
+            $updatedChunks = Chunk::where('document_id', $document->id)->update($chunkUpdateData);
 
             Log::info('🧩 BULK CHUNKS UPDATED', [
                 'document_id' => $document->id,
                 'chunks_updated' => $updatedChunks,
                 'total_chunks' => $chunksCount
             ]);
+
+            // CRITICAL: Re-embed chunks with new source_scope metadata
+            if ($newScope === 'organization') {
+                Log::info('🔄 BULK RE-EMBEDDING CHUNKS FOR ORGANIZATION SCOPE', [
+                    'document_id' => $document->id,
+                    'chunks_count' => $chunksCount,
+                    'reason' => 'Document shared to organization - updating vector store metadata'
+                ]);
+                
+                // Get all chunks for this document
+                $chunks = Chunk::where('document_id', $document->id)->get();
+                
+                if ($chunks->isNotEmpty()) {
+                    // Dispatch re-embedding job to update vector store metadata
+                    \App\Jobs\EmbedChunksBatchJob::dispatch(
+                        $chunks->pluck('id')->toArray(),
+                        $orgId
+                    );
+                    
+                    Log::info('✅ BULK RE-EMBEDDING JOB DISPATCHED', [
+                        'document_id' => $document->id,
+                        'chunk_ids' => $chunks->pluck('id')->toArray(),
+                        'org_id' => $orgId
+                    ]);
+                }
+            }
 
             $updatedCount++;
 

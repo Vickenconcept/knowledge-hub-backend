@@ -38,7 +38,7 @@ class EmbedChunksBatchJob implements ShouldQueue
                     'document_id' => (string) $chunk->document_id,
                     'org_id' => (string) $this->orgId,
                     'connector_id' => $chunk->document ? (string) $chunk->document->connector_id : null,
-                    'source_scope' => $chunk->source_scope ?? 'organization',
+                    'source_scope' => $chunk->source_scope, // Use the chunk's actual scope
                     'workspace_name' => $chunk->workspace_name,
                     'char_start' => $chunk->char_start,
                     'char_end' => $chunk->char_end,

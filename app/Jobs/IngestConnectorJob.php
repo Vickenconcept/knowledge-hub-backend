@@ -391,7 +391,7 @@ class IngestConnectorJob implements ShouldQueue
                         'char_start' => $index * 2000,
                         'char_end' => ($index + 1) * 2000,
                         'token_count' => str_word_count($chunkText),
-                        'source_scope' => $connector->connection_scope ?? 'organization',
+                        'source_scope' => $connector->connection_scope, // Use connector's actual scope
                         'workspace_name' => $connector->workspace_name,
                     ]);
                     $createdChunks[] = $chunk;
@@ -716,8 +716,18 @@ class IngestConnectorJob implements ShouldQueue
                             's3_path' => null,
                             'fetched_at' => now(),
                             'doc_type' => 'notion_page',
-                            'source_scope' => $connector->connection_scope ?? 'organization',
+                            'source_scope' => $connector->connection_scope, // Use connector's actual scope
                             'workspace_name' => $connector->workspace_name,
+                        ]);
+                        
+                        Log::info('📄 NOTION DOCUMENT CREATED IN DATABASE', [
+                            'document_id' => $document->id,
+                            'title' => $pageTitle,
+                            'connector_id' => $connector->id,
+                            'connector_scope' => $connector->connection_scope,
+                            'document_source_scope' => $document->source_scope,
+                            'workspace_name' => $connector->workspace_name,
+                            'user_id' => $connector->getPrimaryUser()
                         ]);
                         
                         // Track document ingestion for quota management
@@ -752,7 +762,7 @@ class IngestConnectorJob implements ShouldQueue
                             'char_start' => $chunkIndex * 2000,
                             'char_end' => ($chunkIndex + 1) * 2000,
                             'token_count' => str_word_count($chunkText),
-                            'source_scope' => $connector->connection_scope ?? 'organization',
+                            'source_scope' => $connector->connection_scope, // Use connector's actual scope
                             'workspace_name' => $connector->workspace_name,
                         ]);
                         $createdChunks[] = $chunk;
@@ -1126,10 +1136,20 @@ class IngestConnectorJob implements ShouldQueue
                             'tags' => $classification['tags'],
                             'sha256' => $contentHash,
                             'size' => strlen($content),
-                            'source_scope' => $connector->connection_scope ?? 'organization',
+                            'source_scope' => $connector->connection_scope, // Use connector's actual scope
                             'workspace_name' => $connector->workspace_name,
                             's3_path' => $cloudinaryUrl, // Store Cloudinary URL
                     'fetched_at' => now(),
+                ]);
+                
+                Log::info('📄 GOOGLE DRIVE DOCUMENT CREATED IN DATABASE', [
+                    'document_id' => $document->id,
+                    'title' => $file->getName(),
+                    'connector_id' => $connector->id,
+                    'connector_scope' => $connector->connection_scope,
+                    'document_source_scope' => $document->source_scope,
+                    'workspace_name' => $connector->workspace_name,
+                    'user_id' => $connector->getPrimaryUser()
                 ]);
                         
                         // ✅ Track document ingestion for quota management
@@ -1266,7 +1286,7 @@ class IngestConnectorJob implements ShouldQueue
                             'document_id' => $chunk->document_id,
                             'org_id' => $chunk->org_id,
                             'connector_id' => $this->connectorId,
-                            'source_scope' => $chunk->source_scope ?? 'organization',
+                            'source_scope' => $chunk->source_scope, // Use the chunk's actual scope
                             'workspace_name' => $chunk->workspace_name,
                         ]
                     ];
@@ -1601,6 +1621,18 @@ class IngestConnectorJob implements ShouldQueue
                             'size' => strlen($content),
                             's3_path' => $cloudinaryUrl, // Store Cloudinary URL
                             'fetched_at' => now(),
+                            'source_scope' => $connector->connection_scope, // Use connector's actual scope
+                            'workspace_name' => $connector->workspace_name,
+                        ]);
+                        
+                        Log::info('📄 DROPBOX DOCUMENT CREATED IN DATABASE', [
+                            'document_id' => $document->id,
+                            'title' => $file['name'],
+                            'connector_id' => $connector->id,
+                            'connector_scope' => $connector->connection_scope,
+                            'document_source_scope' => $document->source_scope,
+                            'workspace_name' => $connector->workspace_name,
+                            'user_id' => $connector->getPrimaryUser()
                         ]);
                         
                         // ✅ Track document ingestion for quota management
@@ -2438,6 +2470,8 @@ class IngestConnectorJob implements ShouldQueue
                 'tags' => $classification['tags'],
                 's3_path' => $cloudinaryUrl,
                 'sha256' => hash('sha256', $content),
+                'source_scope' => $connector->connection_scope, // Use connector's actual scope
+                'workspace_name' => $connector->workspace_name,
                 'metadata' => array_merge($classification['metadata'], [
                     'channel_id' => $channelId,
                     'channel_name' => $channelName,
@@ -2462,6 +2496,17 @@ class IngestConnectorJob implements ShouldQueue
                     'source_platform' => 'slack',
                 ]),
                 'fetched_at' => now(),
+            ]);
+            
+            Log::info('📄 SLACK CONVERSATION DOCUMENT CREATED IN DATABASE', [
+                'document_id' => $document->id,
+                'title' => $newTitle,
+                'connector_id' => $this->connectorId,
+                'connector_scope' => $connector->connection_scope,
+                'document_source_scope' => $document->source_scope,
+                'workspace_name' => $connector->workspace_name,
+                'user_id' => $connector->getPrimaryUser(),
+                'channel_name' => $channelName
             ]);
             
             // ✅ Track document ingestion for quota management
@@ -2854,6 +2899,8 @@ class IngestConnectorJob implements ShouldQueue
                         'tags' => $fileClassification['tags'],
                         's3_path' => $fileCloudinaryUrl,
                         'sha256' => $contentHash,
+                        'source_scope' => $connector->connection_scope, // Use connector's actual scope
+                        'workspace_name' => $connector->workspace_name,
                         'metadata' => array_merge($fileClassification['metadata'], [
                             'shared_in_slack' => true,
                             'channel_name' => $channelName,
@@ -2866,6 +2913,17 @@ class IngestConnectorJob implements ShouldQueue
                             'is_downloadable' => true,
                         ]),
                         'fetched_at' => now(),
+                    ]);
+                    
+                    Log::info('📄 SLACK FILE DOCUMENT CREATED IN DATABASE', [
+                        'document_id' => $fileDocument->id,
+                        'title' => $fileName,
+                        'connector_id' => $this->connectorId,
+                        'connector_scope' => $connector->connection_scope,
+                        'document_source_scope' => $fileDocument->source_scope,
+                        'workspace_name' => $connector->workspace_name,
+                        'user_id' => $connector->getPrimaryUser(),
+                        'file_id' => $fileId
                     ]);
                     
                     // ✅ Track document ingestion for quota management
@@ -2897,7 +2955,7 @@ class IngestConnectorJob implements ShouldQueue
                         'char_start' => $index * 2000,
                         'char_end' => ($index + 1) * 2000,
                             'token_count' => str_word_count($chunkText),
-                            'source_scope' => $connector->connection_scope ?? 'organization',
+                            'source_scope' => $connector->connection_scope, // Use connector's actual scope
                             'workspace_name' => $connector->workspace_name,
                         ]);
                     $createdChunks[] = $chunk;
