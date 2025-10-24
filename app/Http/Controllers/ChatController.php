@@ -472,6 +472,13 @@ class ChatController extends Controller
                         'tags' => $chunk->document->tags ?? [],
                         'metadata' => $chunk->document->metadata ?? null,
                         'chunk_count' => 0,
+                        'connector' => $connector ? [
+                            'id' => $connector->id,
+                            'type' => $connector->type,
+                            'label' => $connector->label,
+                            'connection_scope' => $chunk->document->source_scope, // Use document's source_scope, not connector's
+                            'workspace_name' => $connector->workspace_name,
+                        ] : null,
                     ];
                 }
                 
@@ -531,6 +538,9 @@ class ChatController extends Controller
                 return ($b['score'] ?? 0) <=> ($a['score'] ?? 0);
             });
 
+            // Smart source filtering based on query complexity and relevance
+            $filteredSources = $this->filterSourcesIntelligently($formattedSources, $queryText);
+
             // Log the query for analytics
             \App\Models\QueryLog::create([
                 'id' => (string) \Illuminate\Support\Str::uuid(),
@@ -564,9 +574,9 @@ class ChatController extends Controller
 
             return response()->json([
                 'answer' => $answerText,
-                'sources' => $formattedSources,
+                'sources' => $filteredSources,
                 'query' => $queryText,
-                'result_count' => count($formattedSources),
+                'result_count' => count($filteredSources),
                 'conversation_id' => $conversation->id,
                 'workspace_stats' => $workspaceStats, // Workspace breakdown
                 'search_scope' => $searchScope, // Applied search scope
@@ -1119,5 +1129,86 @@ class ChatController extends Controller
             'sources' => $taggedSources,
             'workspace_stats' => $workspaceStats
         ];
+    }
+
+    /**
+     * Intelligently filter sources based on query complexity and relevance
+     */
+    private function filterSourcesIntelligently(array $sources, string $query): array
+    {
+        $query = strtolower(trim($query));
+        $queryLength = strlen($query);
+        $queryWords = str_word_count($query);
+        
+        // Simple greetings or short queries should have fewer sources
+        $isSimpleGreeting = in_array($query, ['hello', 'hi', 'hey', 'good morning', 'good afternoon', 'good evening']);
+        $isShortQuery = $queryLength <= 10 || $queryWords <= 2;
+        
+        // Calculate relevance threshold based on query complexity
+        $baseThreshold = 0.3;
+        $relevanceThreshold = $baseThreshold;
+        
+        if ($isSimpleGreeting) {
+            // For greetings, only show very relevant sources (high threshold)
+            $relevanceThreshold = 0.6;
+            $maxSources = 1;
+        } elseif ($isShortQuery) {
+            // For short queries, be more selective
+            $relevanceThreshold = 0.5;
+            $maxSources = 2;
+        } elseif ($queryWords <= 5) {
+            // Medium complexity queries
+            $relevanceThreshold = 0.4;
+            $maxSources = 3;
+        } else {
+            // Complex queries can have more sources
+            $relevanceThreshold = 0.3;
+            $maxSources = 5;
+        }
+        
+        // Filter by relevance threshold
+        $filteredSources = array_filter($sources, function($source) use ($relevanceThreshold) {
+            return ($source['score'] ?? 0) >= $relevanceThreshold;
+        });
+        
+        // Remove duplicates based on title similarity
+        $uniqueSources = [];
+        $seenTitles = [];
+        
+        foreach ($filteredSources as $source) {
+            $title = strtolower($source['title'] ?? '');
+            $isDuplicate = false;
+            
+            // Check for similar titles (fuzzy matching)
+            foreach ($seenTitles as $seenTitle) {
+                $similarity = similar_text($title, $seenTitle, $percent);
+                if ($percent > 80) { // 80% similarity threshold
+                    $isDuplicate = true;
+                    break;
+                }
+            }
+            
+            if (!$isDuplicate) {
+                $uniqueSources[] = $source;
+                $seenTitles[] = $title;
+                
+                // Stop if we've reached the maximum
+                if (count($uniqueSources) >= $maxSources) {
+                    break;
+                }
+            }
+        }
+        
+        Log::info('Smart source filtering applied', [
+            'original_count' => count($sources),
+            'filtered_count' => count($uniqueSources),
+            'query' => $query,
+            'is_simple_greeting' => $isSimpleGreeting,
+            'is_short_query' => $isShortQuery,
+            'relevance_threshold' => $relevanceThreshold,
+            'max_sources' => $maxSources
+        ]);
+        
+        return $uniqueSources;
     }
 }
