@@ -256,10 +256,11 @@ class IngestConnectorJob implements ShouldQueue
                 // Calculate content hash from temp file
                 $contentHash = hash_file('sha256', $tmpPath);
                 
-                // Check if document with same content already exists
+                // Check if document with same content already exists in the SAME SCOPE
                 $existingDocument = \App\Models\Document::where('org_id', $this->orgId)
                     ->where('id', '!=', $document->id) // Exclude current document
                     ->where('sha256', $contentHash)
+                    ->where('source_scope', $document->source_scope) // Only check within same scope
                     ->first();
                 
                 if ($existingDocument) {
@@ -548,10 +549,11 @@ class IngestConnectorJob implements ShouldQueue
                     ]);
                     $job->save();
 
-                    // Check if document already exists
+                    // Check if document already exists in the SAME SCOPE
                     $existingDocument = \App\Models\Document::where('org_id', $this->orgId)
                         ->where('connector_id', $connector->id)
                         ->where('source_url', $pageUrl)
+                        ->where('source_scope', $connector->connection_scope) // Only check within same scope
                         ->first();
 
                     $text = '';
@@ -967,6 +969,7 @@ class IngestConnectorJob implements ShouldQueue
                     $existingDocument = \App\Models\Document::where('org_id', $this->orgId)
                         ->where('connector_id', $connector->id)
                         ->where('source_url', $file->getWebViewLink())
+                        ->where('source_scope', $connector->connection_scope) // Only check within same scope
                         ->first();
 
                     // Google Drive provides MD5 hash in metadata (if available)
@@ -1469,6 +1472,7 @@ class IngestConnectorJob implements ShouldQueue
                     $existingDocument = \App\Models\Document::where('org_id', $this->orgId)
                         ->where('connector_id', $connector->id)
                         ->where('source_url', $dropboxSourceUrl)
+                        ->where('source_scope', $connector->connection_scope) // Only check within same scope
                         ->first();
 
                     // Dropbox provides modified_time in metadata
@@ -2289,11 +2293,13 @@ class IngestConnectorJob implements ShouldQueue
         }
         
         // ========================================
-        // Check if conversation document already exists
+        // Check if conversation document already exists in the SAME SCOPE
         // ========================================
+        $connector = \App\Models\Connector::find($this->connectorId);
         $existingDoc = \App\Models\Document::where('org_id', $this->orgId)
             ->where('connector_id', $this->connectorId)
             ->where('external_id', $externalId)
+            ->where('source_scope', $connector->connection_scope) // Only check within same scope
             ->first();
         
         // Check if existing document has reached limits (for channels only, not threads)
@@ -2628,9 +2634,11 @@ class IngestConnectorJob implements ShouldQueue
                 // ========================================
                 // Check for existing document (same as Google Drive/Dropbox)
                 // ========================================
+                $connector = \App\Models\Connector::find($this->connectorId);
                 $existingFileDoc = \App\Models\Document::where('org_id', $this->orgId)
                     ->where('connector_id', $this->connectorId)
                     ->where('external_id', 'slack_file_' . $fileId)
+                    ->where('source_scope', $connector->connection_scope) // Only check within same scope
                     ->first();
                 
                 Log::info("Downloading Slack file", [
