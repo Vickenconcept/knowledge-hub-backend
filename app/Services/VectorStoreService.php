@@ -128,12 +128,14 @@ class VectorStoreService
                 
                 // Apply connector filter
                 if (isset($filter['connector_id'])) {
-                    $connectorIds = $filter['connector_id']['$in'] ?? [$filter['connector_id']];
-                    
+                $connectorIds = $filter['connector_id']['$in'] ?? [$filter['connector_id']];
+                
                     // Handle null values (system documents) separately
                     $hasNull = in_array(null, $connectorIds, true);
                     $nonNullIds = array_filter($connectorIds, function($id) { return $id !== null; });
                     
+                    // CRITICAL FIX: For organization-scoped documents, we need to include ALL connectors
+                    // that have organization-scoped documents, not just the selected ones
                     if ($hasNull && !empty($nonNullIds)) {
                         // Both null and non-null connectors
                         $query->where(function($q) use ($nonNullIds) {
@@ -144,8 +146,14 @@ class VectorStoreService
                         // Only null connectors (system documents)
                         $query->whereNull('documents.connector_id');
                     } else {
-                        // Only non-null connectors
-                        $query->whereIn('documents.connector_id', $nonNullIds);
+                        // CRITICAL FIX: For organization documents, include ALL connectors
+                        // This ensures organization-scoped documents are accessible from any connector
+                        $query->where(function($q) use ($nonNullIds) {
+                            $q->whereIn('documents.connector_id', $nonNullIds)
+                              ->orWhere(function($subQ) {
+                                  $subQ->where('chunks.source_scope', 'organization');
+                              });
+                        });
                     }
                     
                     Log::info('📊 Applying connector filter', [
@@ -161,6 +169,7 @@ class VectorStoreService
                     Log::info('📊 Applying source scope filter', ['source_scope' => $filter['source_scope']]);
                 } elseif (isset($filter['user_id'])) {
                     // For 'both' scope: include organization docs for all + personal docs for this user
+                    // CRITICAL FIX: Organization documents should be accessible regardless of connector access
                     $query->where(function($q) use ($filter) {
                         $q->where('chunks.source_scope', 'organization')
                           ->orWhere(function($subQ) use ($filter) {

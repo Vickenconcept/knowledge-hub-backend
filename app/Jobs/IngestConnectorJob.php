@@ -1187,6 +1187,8 @@ class IngestConnectorJob implements ShouldQueue
                             'char_start' => $index * 2000, // Approximate
                             'char_end' => ($index + 1) * 2000,
                             'token_count' => str_word_count($chunkText), // Rough estimate
+                            'source_scope' => $connector->connection_scope, // CRITICAL FIX: Add missing source_scope
+                            'workspace_name' => $connector->workspace_name, // CRITICAL FIX: Add missing workspace_name
                         ]);
                         $createdChunks[] = $chunk;
                         $chunks++;
@@ -1294,6 +1296,20 @@ class IngestConnectorJob implements ShouldQueue
                         ]
                     ];
                 }
+                
+                // CRITICAL LOGGING: Track what metadata is being sent to vector store
+                Log::info('🔍 EMBEDDING METADATA BEING SENT TO VECTOR STORE', [
+                    'batch_index' => $batchIndex,
+                    'vectors_count' => count($vectors),
+                    'sample_metadata' => array_slice(array_map(function($v) {
+                        return [
+                            'chunk_id' => $v['id'],
+                            'source_scope' => $v['metadata']['source_scope'],
+                            'workspace_name' => $v['metadata']['workspace_name'],
+                            'connector_id' => $v['metadata']['connector_id']
+                        ];
+                    }, $vectors), 0, 3)
+                ]);
 
                 // Upsert to Pinecone with org_id as namespace and cost tracking
                 $vectorStore->upsert($vectors, $this->orgId, $this->orgId, $documentId, $job->id);
@@ -1671,6 +1687,8 @@ class IngestConnectorJob implements ShouldQueue
                             'char_start' => $index * 2000, // Approximate
                             'char_end' => ($index + 1) * 2000,
                             'token_count' => str_word_count($chunkText), // Rough estimate
+                            'source_scope' => $connector->connection_scope, // CRITICAL FIX: Add missing source_scope
+                            'workspace_name' => $connector->workspace_name, // CRITICAL FIX: Add missing workspace_name
                         ]);
                         $createdChunks[] = $chunk;
                         $chunks++;
@@ -2559,6 +2577,8 @@ class IngestConnectorJob implements ShouldQueue
                 'chunk_index' => $index,
                 'text' => $chunkText,  // ← Fixed: use 'text' not 'content'
                 'token_count' => (int)(str_word_count($chunkText) * 1.3),
+                'source_scope' => $connector->connection_scope, // CRITICAL FIX: Add missing source_scope
+                'workspace_name' => $connector->workspace_name, // CRITICAL FIX: Add missing workspace_name
             ]);
             $chunkObjects[] = $chunkObj;
             $chunks++; // Increment chunk counter
@@ -2568,6 +2588,15 @@ class IngestConnectorJob implements ShouldQueue
             'document_id' => $document->id,
             'chunk_count' => count($chunkObjects),
             'total_content_length' => strlen($conversationContent),
+            'connector_scope' => $connector->connection_scope,
+            'workspace_name' => $connector->workspace_name,
+            'chunk_scopes' => array_map(function($chunk) {
+                return [
+                    'chunk_id' => $chunk->id,
+                    'source_scope' => $chunk->source_scope,
+                    'workspace_name' => $chunk->workspace_name
+                ];
+            }, $chunkObjects)
         ]);
         
         // Use the same embedding method as Google Drive/Dropbox

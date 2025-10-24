@@ -373,6 +373,24 @@ class ChatController extends Controller
             // Get enhanced context based on routing decision
             $enhancedContext = \App\Services\ContextRouter::buildEnhancedContext($routing, $conversation->id, $conversationHistory);
             
+            // Log context before RAG processing
+            Log::info('🧠 RAG CONTEXT ASSEMBLY', [
+                'user_id' => $user->id,
+                'query' => $queryText,
+                'snippets_count' => count($snippets),
+                'snippet_previews' => array_map(function($s) {
+                    return [
+                        'chunk_id' => $s['chunk_id'],
+                        'document_id' => $s['document_id'],
+                        'score' => $s['score'],
+                        'text_preview' => mb_substr($s['text'], 0, 100) . '...'
+                    ];
+                }, array_slice($snippets, 0, 3)),
+                'response_style' => $responseStyle,
+                'routing' => $routing,
+                'enhanced_context_length' => is_array($enhancedContext['conversation_history'] ?? null) ? count($enhancedContext['conversation_history']) : strlen($enhancedContext['conversation_history'] ?? '')
+            ]);
+            
             // Pass routing metadata to RAG for intelligent prompt building
             $prompt = $rag->assemblePrompt(
                 $queryText, 
@@ -387,18 +405,37 @@ class ChatController extends Controller
             $styleConfig = \App\Services\ResponseStyleService::getStyleInstructions($responseStyle);
             $maxTokens = $styleConfig['config']['max_tokens'] ?? 1500;
             
-            Log::info('Style config loaded', [
-                'style' => $responseStyle,
+            Log::info('📝 RAG PROMPT ASSEMBLED', [
+                'user_id' => $user->id,
+                'prompt_length' => strlen($prompt),
+                'prompt_preview' => mb_substr($prompt, 0, 500) . '...',
                 'max_tokens' => $maxTokens,
+                'style' => $responseStyle,
                 'detail_level' => $styleConfig['config']['detail_level']
             ]);
             
             $llmResponse = $rag->callLLM($prompt, $maxTokens, $orgId, $user->id, $conversation->id, $queryText);
+            
+            Log::info('🤖 LLM RESPONSE RECEIVED', [
+                'user_id' => $user->id,
+                'response_type' => gettype($llmResponse),
+                'response_preview' => is_string($llmResponse) ? mb_substr($llmResponse, 0, 200) . '...' : 'Non-string response',
+                'response_length' => is_string($llmResponse) ? strlen($llmResponse) : 'N/A',
+                'has_answer_key' => isset($llmResponse['answer']),
+                'answer_preview' => isset($llmResponse['answer']) ? mb_substr($llmResponse['answer'], 0, 200) . '...' : 'No answer key'
+            ]);
 
             // Parse and normalize the LLM response into a strict contract
             $rawAnswer = $llmResponse['answer'] ?? '';
             $answerText = is_string($rawAnswer) ? $rawAnswer : '';
             $llmSources = [];
+            
+            Log::info('📋 PARSING LLM RESPONSE', [
+                'user_id' => $user->id,
+                'raw_answer_type' => gettype($rawAnswer),
+                'raw_answer_preview' => is_string($rawAnswer) ? mb_substr($rawAnswer, 0, 300) . '...' : 'Non-string',
+                'answer_text_preview' => is_string($answerText) ? mb_substr($answerText, 0, 300) . '...' : 'Non-string'
+            ]);
 
             // Case 1: answer is a JSON string { answer, sources }
             if (is_string($answerText)) {
@@ -426,6 +463,21 @@ class ChatController extends Controller
             // 5. Format sources with full details (title, URL, excerpt, type)
             // Group by document to avoid duplicate sources
             $sourcesByDocument = [];
+            
+            Log::info('🔍 PROCESSING SNIPPETS FOR SOURCES', [
+                'user_id' => $user->id,
+                'snippets_count' => count($snippets),
+                'query' => $queryText,
+                'snippet_previews' => array_map(function($s) {
+                    return [
+                        'chunk_id' => $s['chunk_id'],
+                        'document_id' => $s['document_id'],
+                        'score' => $s['score'],
+                        'text_preview' => mb_substr($s['text'], 0, 100) . '...'
+                    ];
+                }, array_slice($snippets, 0, 3))
+            ]);
+            
             foreach ($snippets as $idx => $snippet) {
                 $chunk = $chunks[$snippet['chunk_id']] ?? null;
                 if (!$chunk || !$chunk->document) continue;
@@ -496,6 +548,20 @@ class ChatController extends Controller
             $formattedSources = [];
             $workspaceStats = [];
             
+            Log::info('📚 BUILDING FINAL SOURCES', [
+                'user_id' => $user->id,
+                'sources_by_document_count' => count($sourcesByDocument),
+                'source_documents' => array_map(function($source) {
+                    return [
+                        'document_id' => $source['document_id'],
+                        'title' => $source['title'],
+                        'type' => $source['type'],
+                        'chunk_count' => $source['chunk_count'],
+                        'connection_scope' => $source['connector']['connection_scope'] ?? 'unknown'
+                    ];
+                }, $sourcesByDocument)
+            ]);
+            
             foreach ($sourcesByDocument as $documentId => $source) {
                 // Combine excerpts with separator, limit to 2-3 most relevant
                 $topExcerpts = array_slice($source['excerpts'], 0, 3);
@@ -505,11 +571,21 @@ class ChatController extends Controller
                 $workspaceInfo = null;
                 if (isset($source['connector'])) {
                     $connector = $source['connector'];
+                    $documentScope = $connector['connection_scope']; // This was set to document's source_scope on line 531
+                    
+                    Log::info('🔍 WORKSPACE INFO BUILDING', [
+                        'document_id' => $documentId,
+                        'document_title' => $source['title'],
+                        'connector_connection_scope' => $connector['connection_scope'],
+                        'document_scope_used' => $documentScope,
+                        'workspace_name' => $connector['workspace_name'] ?? $connector['label']
+                    ]);
+                    
                     $workspaceInfo = [
                         'workspace_name' => $connector['workspace_name'] ?? $connector['label'],
-                        'workspace_scope' => $connector['connection_scope'] ?? 'organization',
-                        'workspace_icon' => $connector['connection_scope'] === 'personal' ? '👤' : '🏢',
-                        'workspace_label' => $connector['connection_scope'] === 'personal' ? 'Personal' : 'Organization'
+                        'workspace_scope' => $documentScope, // Use the document's actual scope
+                        'workspace_icon' => $documentScope === 'personal' ? '👤' : '🏢',
+                        'workspace_label' => $documentScope === 'personal' ? 'Personal' : 'Organization'
                     ];
                     
                     // Track workspace stats
@@ -572,16 +648,28 @@ class ChatController extends Controller
                 })->afterResponse();
             }
 
-            return response()->json([
-                'answer' => $answerText,
-                'sources' => $filteredSources,
-                'query' => $queryText,
-                'result_count' => count($filteredSources),
-                'conversation_id' => $conversation->id,
-                'workspace_stats' => $workspaceStats, // Workspace breakdown
-                'search_scope' => $searchScope, // Applied search scope
-                'raw' => $llmResponse['raw'] ?? null
-            ]);
+        // Final response logging
+        Log::info('🎯 FINAL RESPONSE ASSEMBLED', [
+            'user_id' => $user->id,
+            'query' => $queryText,
+            'answer_length' => strlen($answerText),
+            'answer_preview' => mb_substr($answerText, 0, 200) . '...',
+            'sources_count' => count($filteredSources),
+            'workspace_stats' => $workspaceStats,
+            'search_scope' => $searchScope,
+            'conversation_id' => $conversation->id
+        ]);
+        
+        return response()->json([
+            'answer' => $answerText,
+            'sources' => $filteredSources,
+            'query' => $queryText,
+            'result_count' => count($filteredSources),
+            'conversation_id' => $conversation->id,
+            'workspace_stats' => $workspaceStats, // Workspace breakdown
+            'search_scope' => $searchScope, // Applied search scope
+            'raw' => $llmResponse['raw'] ?? null
+        ]);
 
         } catch (\Exception $e) {
             Log::error('ChatController@ask error: ' . $e->getMessage(), ['trace' => $e->getTraceAsString()]);
@@ -938,12 +1026,29 @@ class ChatController extends Controller
             $allOrgConnectors = \App\Models\Connector::where('org_id', $orgId)->pluck('id')->toArray();
             $accessibleConnectors = array_unique(array_merge($allOrgConnectors, $accessibleConnectors));
         }
-
-        // Add connector filtering
+        
+        // CRITICAL FIX: If user has selected specific connectors, ONLY search those connectors
+        // This respects the user's explicit connector selection and prevents cross-contamination
+        // between personal and organization scopes when user wants to search specific connectors
         if (!empty($connectorIds)) {
-            // Intersect with user-accessible connectors to ensure security
-            $accessibleConnectors = array_intersect($connectorIds, $accessibleConnectors);
+            Log::info('🔍 USER SELECTED SPECIFIC CONNECTORS - RESPECTING SELECTION', [
+                'user_id' => $userId,
+                'selected_connectors' => $connectorIds,
+                'original_accessible_count' => count($accessibleConnectors),
+                'search_scope' => $searchScope
+            ]);
+            
+            // ONLY use the selected connectors - respect user's choice
+            $accessibleConnectors = $connectorIds;
+            
+            Log::info('✅ RESPECTING USER SELECTION', [
+                'user_id' => $userId,
+                'final_accessible_count' => count($accessibleConnectors),
+                'selected_connectors_only' => $connectorIds
+            ]);
         }
+
+        // Connector filtering is now handled above - respect user's selection
 
         if (!empty($accessibleConnectors)) {
             // Include both accessible connectors AND system documents (connector_id = null)
@@ -1145,24 +1250,24 @@ class ChatController extends Controller
         $isShortQuery = $queryLength <= 10 || $queryWords <= 2;
         
         // Calculate relevance threshold based on query complexity
-        $baseThreshold = 0.3;
+        $baseThreshold = 0.2; // Lower base threshold
         $relevanceThreshold = $baseThreshold;
         
         if ($isSimpleGreeting) {
             // For greetings, only show very relevant sources (high threshold)
-            $relevanceThreshold = 0.6;
+            $relevanceThreshold = 0.5; // Reduced from 0.6
             $maxSources = 1;
         } elseif ($isShortQuery) {
             // For short queries, be more selective
-            $relevanceThreshold = 0.5;
+            $relevanceThreshold = 0.3; // Reduced from 0.5
             $maxSources = 2;
         } elseif ($queryWords <= 5) {
             // Medium complexity queries
-            $relevanceThreshold = 0.4;
+            $relevanceThreshold = 0.25; // Reduced from 0.4
             $maxSources = 3;
         } else {
             // Complex queries can have more sources
-            $relevanceThreshold = 0.3;
+            $relevanceThreshold = 0.2; // Reduced from 0.3
             $maxSources = 5;
         }
         
@@ -1171,31 +1276,81 @@ class ChatController extends Controller
             return ($source['score'] ?? 0) >= $relevanceThreshold;
         });
         
-        // Remove duplicates based on title similarity
+        // FALLBACK: If no sources pass the threshold, use the top sources anyway
+        if (empty($filteredSources) && !empty($sources)) {
+            Log::info('No sources passed relevance threshold, using top sources as fallback', [
+                'query' => $query,
+                'relevance_threshold' => $relevanceThreshold,
+                'top_scores' => array_slice(array_map(function($s) { return $s['score'] ?? 0; }, $sources), 0, 3)
+            ]);
+            
+            // Sort by score and take the top sources
+            usort($sources, function($a, $b) {
+                return ($b['score'] ?? 0) <=> ($a['score'] ?? 0);
+            });
+            $filteredSources = array_slice($sources, 0, min(3, count($sources)));
+        }
+        
+        // SEMANTIC RELEVANCE FILTERING - Prioritize sources that match query context
+        $semanticallyRelevantSources = $this->prioritizeSemanticRelevance($filteredSources, $query);
+        
+        // CRITICAL FIX: Remove duplicates based on title similarity BUT consider scope information
+        // This prevents the same document from appearing twice when it exists in both personal and organization scopes
+        // Priority: Organization scope > Personal scope (organization documents are more widely accessible)
         $uniqueSources = [];
         $seenTitles = [];
         
-        foreach ($filteredSources as $source) {
+        foreach ($semanticallyRelevantSources as $source) {
             $title = strtolower($source['title'] ?? '');
+            $sourceScope = $source['workspace_info']['workspace_scope'] ?? 'organization';
             $isDuplicate = false;
+            $shouldReplace = false;
+            $replaceIndex = -1;
             
-            // Check for similar titles (fuzzy matching)
-            foreach ($seenTitles as $seenTitle) {
+            // Check for similar titles (fuzzy matching) but consider scope
+            foreach ($seenTitles as $index => $seenTitle) {
                 $similarity = similar_text($title, $seenTitle, $percent);
                 if ($percent > 80) { // 80% similarity threshold
                     $isDuplicate = true;
-                    break;
+                    $existingScope = $uniqueSources[$index]['workspace_info']['workspace_scope'] ?? 'organization';
+                    
+                    // CRITICAL FIX: Prioritize organization scope over personal scope
+                    if ($sourceScope === 'organization' && $existingScope === 'personal') {
+                        $shouldReplace = true;
+                        $replaceIndex = $index;
+                        Log::info('🔄 SCOPE PRIORITY: Replacing personal with organization scope', [
+                            'title' => $title,
+                            'existing_scope' => $existingScope,
+                            'new_scope' => $sourceScope
+                        ]);
+                        break;
+                    } elseif ($sourceScope === 'personal' && $existingScope === 'organization') {
+                        // Keep organization scope, skip personal
+                        Log::info('🔄 SCOPE PRIORITY: Keeping organization scope over personal', [
+                            'title' => $title,
+                            'existing_scope' => $existingScope,
+                            'new_scope' => $sourceScope
+                        ]);
+                        break;
+                    } else {
+                        // Same scope, keep first one
+                        break;
+                    }
                 }
             }
             
             if (!$isDuplicate) {
                 $uniqueSources[] = $source;
                 $seenTitles[] = $title;
-                
-                // Stop if we've reached the maximum
-                if (count($uniqueSources) >= $maxSources) {
-                    break;
-                }
+            } elseif ($shouldReplace) {
+                // Replace personal with organization scope
+                $uniqueSources[$replaceIndex] = $source;
+                $seenTitles[$replaceIndex] = $title;
+            }
+            
+            // Stop if we've reached the maximum
+            if (count($uniqueSources) >= $maxSources) {
+                break;
             }
         }
         
@@ -1206,9 +1361,120 @@ class ChatController extends Controller
             'is_simple_greeting' => $isSimpleGreeting,
             'is_short_query' => $isShortQuery,
             'relevance_threshold' => $relevanceThreshold,
-            'max_sources' => $maxSources
+            'max_sources' => $maxSources,
+            'scope_breakdown' => array_map(function($source) {
+                return [
+                    'title' => $source['title'],
+                    'scope' => $source['workspace_info']['workspace_scope'] ?? 'unknown',
+                    'score' => $source['score'] ?? 0
+                ];
+            }, $uniqueSources)
         ]);
         
         return $uniqueSources;
+    }
+
+    /**
+     * Prioritize sources based on semantic relevance to the query
+     */
+    private function prioritizeSemanticRelevance(array $sources, string $query): array
+    {
+        // Extract key terms from query for semantic matching
+        $queryTerms = $this->extractKeyTerms($query);
+        
+        // Score each source based on semantic relevance
+        $scoredSources = [];
+        foreach ($sources as $source) {
+            $semanticScore = $this->calculateSemanticScore($source, $queryTerms, $query);
+            $scoredSources[] = [
+                'source' => $source,
+                'semantic_score' => $semanticScore,
+                'original_score' => $source['score'] ?? 0
+            ];
+        }
+        
+        // Sort by semantic relevance (higher is better)
+        usort($scoredSources, function($a, $b) {
+            return $b['semantic_score'] <=> $a['semantic_score'];
+        });
+        
+        // Return sources in order of semantic relevance
+        return array_map(function($item) {
+            return $item['source'];
+        }, $scoredSources);
+    }
+
+    /**
+     * Extract key terms from query for semantic matching
+     */
+    private function extractKeyTerms(string $query): array
+    {
+        $query = strtolower($query);
+        
+        // Common stop words to ignore
+        $stopWords = ['the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'is', 'are', 'was', 'were', 'be', 'been', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might', 'can', 'must', 'shall', 'this', 'that', 'these', 'those', 'i', 'you', 'he', 'she', 'it', 'we', 'they', 'me', 'him', 'her', 'us', 'them', 'my', 'your', 'his', 'her', 'its', 'our', 'their'];
+        
+        // Extract meaningful words
+        $words = preg_split('/\s+/', $query);
+        $keyTerms = array_filter($words, function($word) use ($stopWords) {
+            return strlen($word) > 2 && !in_array($word, $stopWords);
+        });
+        
+        return array_values($keyTerms);
+    }
+
+    /**
+     * Calculate semantic relevance score for a source
+     */
+    private function calculateSemanticScore(array $source, array $queryTerms, string $query): float
+    {
+        $score = 0.0;
+        $title = strtolower($source['title'] ?? '');
+        $type = strtolower($source['type'] ?? '');
+        $excerpt = strtolower($source['excerpt'] ?? '');
+        
+        // 1. Platform/Type matching (reduced weight)
+        if (strpos($query, 'slack') !== false && strpos($type, 'slack') !== false) {
+            $score += 0.2; // Reduced from 0.4
+        }
+        if (strpos($query, 'notion') !== false && strpos($type, 'notion') !== false) {
+            $score += 0.2; // Reduced from 0.4
+        }
+        if (strpos($query, 'google') !== false && strpos($type, 'google') !== false) {
+            $score += 0.2; // Reduced from 0.4
+        }
+        if (strpos($query, 'dropbox') !== false && strpos($type, 'dropbox') !== false) {
+            $score += 0.2; // Reduced from 0.4
+        }
+        
+        // 2. Title relevance (reduced weight)
+        foreach ($queryTerms as $term) {
+            if (strpos($title, $term) !== false) {
+                $score += 0.1; // Reduced from 0.2
+            }
+        }
+        
+        // 3. Content relevance (reduced weight)
+        foreach ($queryTerms as $term) {
+            if (strpos($excerpt, $term) !== false) {
+                $score += 0.05; // Reduced from 0.1
+            }
+        }
+        
+        // 4. Document type relevance (reduced weight)
+        if (strpos($query, 'conversation') !== false && strpos($title, 'conversation') !== false) {
+            $score += 0.15; // Reduced from 0.3
+        }
+        if (strpos($query, 'discuss') !== false && strpos($title, 'conversation') !== false) {
+            $score += 0.15; // Reduced from 0.3
+        }
+        if (strpos($query, 'resume') !== false && strpos($source['doc_type'] ?? '', 'resume') !== false) {
+            $score += 0.15; // Reduced from 0.3
+        }
+        
+        // 5. Base relevance bonus - give all sources a small boost
+        $score += 0.1;
+        
+        return min(1.0, $score); // Cap at 1.0
     }
 }
