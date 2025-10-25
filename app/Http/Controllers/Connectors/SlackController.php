@@ -49,7 +49,7 @@ class SlackController extends BaseConnectorController
             ->first();
 
         if (!$connector) {
-            return response()->json([
+                return response()->json([
                 'error' => 'Connector not found or access denied'
             ], 404);
         }

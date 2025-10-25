@@ -27,9 +27,18 @@ class AuthController extends Controller
             ], 422);
         }
 
+        $organization = Organization::create([
+            'id' => (string) Str::uuid(),
+            'name' => "Organization",
+        ]);
+
+        // Create user
         $user = User::create([
+            'id' => (string) Str::uuid(),
             'name' => $request->name,
             'email' => $request->email,
+            'role' => 'admin',
+            'org_id' => $organization->id,
             'password' => Hash::make($request->password),
         ]);
 
