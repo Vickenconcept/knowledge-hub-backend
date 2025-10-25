@@ -84,11 +84,17 @@ Route::options('{any}', function () {
     return response('', 200);
 })->where('any', '.*');
 
+// Authentication validation endpoints (no auth required)
+Route::get('auth/validate', [AuthController::class, 'validateToken']);
+
 Route::middleware('auth:sanctum')->group(function () {
     Route::post('auth/logout', [AuthController::class, 'logout']);
     Route::get('/user', function (Request $request) {
         return $request->user();
     });
+    
+    // Enhanced authentication endpoints
+    Route::post('auth/refresh', [AuthController::class, 'refreshToken']);
 
     // Chat / Search (rate limited)
     Route::post('chat', [ChatController::class, 'ask'])->middleware('throttle:30,1'); // 30 requests per minute
