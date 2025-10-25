@@ -38,6 +38,11 @@ class TeamController extends Controller
             // Get tier limits
             $limits = \App\Services\UsageLimitService::canAddUser($orgId);
             
+            // Calculate remaining users safely
+            $currentUsage = $limits['current_usage'] ?? count($users);
+            $maxLimit = $limits['limit'] ?? 999999;
+            $remaining = $limits['remaining'] ?? max(0, $maxLimit - $currentUsage);
+            
             return response()->json([
                 'users' => $usersWithOwner,
                 'organization' => [
@@ -46,10 +51,10 @@ class TeamController extends Controller
                     'owner_id' => $org->owner_id,
                 ],
                 'limits' => [
-                    'current' => $limits['current_usage'] ?? count($users),
-                    'max' => $limits['limit'],
-                    'can_add' => $limits['allowed'],
-                    'remaining' => $limits['remaining'],
+                    'current' => $currentUsage,
+                    'max' => $maxLimit,
+                    'can_add' => $limits['allowed'] ?? true,
+                    'remaining' => $remaining,
                 ],
             ]);
         } catch (\Exception $e) {
