@@ -235,14 +235,32 @@ class ChatController extends Controller
             ]);
 
             if (empty($chunkIds)) {
-                return response()->json([
-                    'answer' => "I don't know — no relevant documents found.",
-                    'sources' => [],
+                // FALLBACK: Check if user has any documents at all, if not, provide getting started guidance
+                $userDocumentCount = Document::where('org_id', $orgId)->count();
+                
+                if ($userDocumentCount === 0) {
+                    // New user with no documents - provide getting started guidance
+                    $gettingStartedResponse = $this->getGettingStartedGuidance($queryText);
+                    
+                    return response()->json([
+                        'answer' => $gettingStartedResponse,
+                        'sources' => [],
+                        'query' => $queryText,
+                        'result_count' => 0,
+                        'is_guidance' => true,
+                        'raw' => null
+                    ]);
+                } else {
+                    // User has documents but no relevant matches found
+                    return response()->json([
+                        'answer' => "I don't know — no relevant documents found.",
+                        'sources' => [],
                         'query' => $queryText,
                         'result_count' => 0,
                         'raw' => null
                     ]);
                 }
+            }
 
                 // 3. Fetch chunk rows with SECURITY FILTERING
                 $chunks = Chunk::whereIn('id', $chunkIds)
@@ -1476,5 +1494,74 @@ class ChatController extends Controller
         $score += 0.1;
         
         return min(1.0, $score); // Cap at 1.0
+    }
+
+    /**
+     * Provide getting started guidance for new users
+     */
+    private function getGettingStartedGuidance(string $query): string
+    {
+        $query = strtolower($query);
+        
+        // Check if user is asking about specific topics
+        if (strpos($query, 'how') !== false || strpos($query, 'what') !== false || strpos($query, 'help') !== false) {
+            return "🎉 Welcome to KHub! I'm your AI assistant, but I don't see any documents in your knowledge base yet.\n\n" .
+                   "**To get started:**\n" .
+                   "1. **Connect your cloud sources** - Go to 'Connectors' in the sidebar\n" .
+                   "2. **Sync your data** - Click 'Sync' on any connected source\n" .
+                   "3. **Ask questions** - Once synced, I can help you find information!\n\n" .
+                   "**Popular connectors:**\n" .
+                   "• **Google Drive** - Access your files and documents\n" .
+                   "• **Slack** - Search through team conversations\n" .
+                   "• **Dropbox** - Sync your cloud storage\n\n" .
+                   "Once you have documents synced, I'll be able to answer questions like:\n" .
+                   "• 'Show me all reports from last month'\n" .
+                   "• 'Find conversations about the project'\n" .
+                   "• 'Summarize the meeting notes'\n\n" .
+                   "Ready to connect your first source? Click 'Connectors' to get started! 🚀";
+        }
+        
+        if (strpos($query, 'connect') !== false || strpos($query, 'sync') !== false) {
+            return "🔗 **Connecting Sources to KHub:**\n\n" .
+                   "1. **Navigate to Connectors** - Click 'Connectors' in the left sidebar\n" .
+                   "2. **Choose your source** - Select Google Drive, Slack, Dropbox, or others\n" .
+                   "3. **Authorize access** - Grant KHub permission to read your files\n" .
+                   "4. **Click Sync** - Watch as your data gets indexed\n" .
+                   "5. **Start asking questions** - Once synced, I can help you find information!\n\n" .
+                   "**Security:** Your data stays encrypted and secure. We only read files you authorize.\n\n" .
+                   "Need help? Check the 'Getting Started' guide or contact support!";
+        }
+        
+        if (strpos($query, 'search') !== false || strpos($query, 'find') !== false) {
+            return "🔍 **Searching in KHub:**\n\n" .
+                   "I'd love to help you search, but I don't see any documents in your knowledge base yet!\n\n" .
+                   "**To enable search:**\n" .
+                   "1. **Connect sources** - Go to 'Connectors' and link your cloud storage\n" .
+                   "2. **Sync data** - Click 'Sync' to index your files\n" .
+                   "3. **Ask questions** - Once synced, I can search through everything!\n\n" .
+                   "**Example searches after syncing:**\n" .
+                   "• 'Find all PDFs about marketing'\n" .
+                   "• 'Show me Slack conversations from yesterday'\n" .
+                   "• 'What documents mention the budget?'\n\n" .
+                   "Ready to connect your first source? Let's get started! 🚀";
+        }
+        
+        // Default response for any other queries
+        return "👋 **Welcome to KHub!**\n\n" .
+               "I'm your AI assistant, but I don't see any documents in your knowledge base yet.\n\n" .
+               "**Quick Start Guide:**\n" .
+               "1. **📁 Connect Sources** - Go to 'Connectors' in the sidebar\n" .
+               "2. **🔄 Sync Data** - Click 'Sync' on any connected source\n" .
+               "3. **💬 Ask Questions** - Once synced, I can help you find information!\n\n" .
+               "**Popular Integrations:**\n" .
+               "• **Google Drive** - Access your files and documents\n" .
+               "• **Slack** - Search team conversations\n" .
+               "• **Dropbox** - Sync your cloud storage\n" .
+               "• **Notion** - Index your workspace pages\n\n" .
+               "**Once synced, try asking:**\n" .
+               "• 'What documents do I have about [topic]?'\n" .
+               "• 'Find conversations about [project]'\n" .
+               "• 'Summarize the latest reports'\n\n" .
+               "Ready to connect your first source? Click 'Connectors' to get started! 🎉";
     }
 }

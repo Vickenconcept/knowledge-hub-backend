@@ -55,6 +55,8 @@ class OnboardingService
                     'char_start' => 0,
                     'char_end' => strlen($chunkText),
                     'token_count' => str_word_count($chunkText),
+                    'source_scope' => $sourceScope, // CRITICAL FIX: Set source_scope on chunks
+                    'workspace_name' => 'Getting Started Guide',
                 ]);
 
                 // Generate and store embedding
