@@ -166,7 +166,7 @@ class TeamController extends Controller
             $orgId = $currentUser->org_id;
             
             // Only admins can update roles
-            if ($currentUser->role !== 'admin') {
+            if ($currentUser->role !== 'admin' && $currentUser->role !== 'super_admin') {
                 return response()->json([
                     'error' => 'Forbidden - Admin access required',
                 ], 403);
@@ -225,7 +225,7 @@ class TeamController extends Controller
             $orgId = $currentUser->org_id;
             
             // Only admins can remove users
-            if ($currentUser->role !== 'admin') {
+            if ($currentUser->role !== 'admin' && $currentUser->role !== 'super_admin') {
                 return response()->json([
                     'error' => 'Forbidden - Admin access required',
                 ], 403);

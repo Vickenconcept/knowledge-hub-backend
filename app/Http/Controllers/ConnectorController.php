@@ -100,13 +100,61 @@ class ConnectorController extends Controller
 
             $userId = $request->user()->id;
             $orgId = $request->user()->org_id;
+            $connectionScope = $validated['connection_scope'] ?? 'organization';
+            
+            // Check for duplicate connector: prevent having more than one connector of the same type
+            // in the same scope (organization OR personal, but not both of the same scope)
+            $existingConnector = Connector::where('org_id', $orgId)
+                ->where('type', $validated['type'])
+                ->where('connection_scope', $connectionScope)
+                ->first();
+            
+            if ($existingConnector) {
+                // For personal connectors, check if it belongs to a different user
+                if ($connectionScope === 'personal') {
+                    $hasUserPermission = $existingConnector->userPermissions()
+                        ->where('user_id', $userId)
+                        ->exists();
+                    
+                    if ($hasUserPermission) {
+                        \Log::warning('Duplicate personal connector creation prevented', [
+                            'user_id' => $userId,
+                            'org_id' => $orgId,
+                            'type' => $validated['type'],
+                            'connection_scope' => $connectionScope,
+                            'existing_connector_id' => $existingConnector->id
+                        ]);
+                        
+                        return response()->json([
+                            'success' => false,
+                            'error' => 'You already have a personal connector of this type',
+                            'existing_connector' => $existingConnector
+                        ], 409);
+                    }
+                } else {
+                    // Organization scope: return existing connector
+                    \Log::warning('Duplicate organization connector creation prevented', [
+                        'user_id' => $userId,
+                        'org_id' => $orgId,
+                        'type' => $validated['type'],
+                        'connection_scope' => $connectionScope,
+                        'existing_connector_id' => $existingConnector->id
+                    ]);
+                    
+                    return response()->json([
+                        'success' => false,
+                        'error' => 'Organization connector of this type already exists',
+                        'existing_connector' => $existingConnector
+                    ], 409);
+                }
+            }
             
             $connector = Connector::create([
                 'id' => (string) Str::uuid(),
                 'org_id' => $orgId,
                 'type' => $validated['type'],
                 'label' => $validated['label'] ?? ucfirst($validated['type']),
-                'connection_scope' => $validated['connection_scope'] ?? 'organization',
+                'connection_scope' => $connectionScope,
                 'workspace_name' => $validated['workspace_name'] ?? null,
                 'workspace_id' => $validated['workspace_id'] ?? null,
                 'is_primary' => $validated['is_primary'] ?? false,

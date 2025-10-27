@@ -300,30 +300,56 @@ class ManualUploadController extends BaseConnectorController
         $connector = $query->first();
 
         if (!$connector) {
-            // Create connector if it doesn't exist with workspace info
-            $connector = Connector::create([
-                'id' => (string) Str::uuid(),
-                'org_id' => $orgId,
-                'type' => 'manual_upload',
-                'label' => 'Manual Upload',
-                'connection_scope' => $connectionScope,
-                'workspace_name' => $workspaceName,
-                'status' => 'connected',
-                'metadata' => [
-                    'created_at' => now()->toISOString(),
-                    'upload_count' => 0,
-                    'last_upload_at' => null
-                ]
-            ]);
-            
-            // For personal connectors, create user permission
+            // Additional check to prevent duplicates
+            // For personal connectors, check if user already has a personal connector of this type
             if ($connectionScope === 'personal') {
-                \App\Models\UserConnectorPermission::create([
+                $existingPersonalConnector = Connector::where('org_id', $orgId)
+                    ->where('type', 'manual_upload')
+                    ->where('connection_scope', 'personal')
+                    ->whereHas('userPermissions', function($q) use ($userId) {
+                        $q->where('user_id', $userId);
+                    })
+                    ->first();
+                
+                if ($existingPersonalConnector) {
+                    \Log::warning('Duplicate personal manual upload connector prevented in uploadFiles', [
+                        'user_id' => $userId,
+                        'org_id' => $orgId,
+                        'existing_connector_id' => $existingPersonalConnector->id
+                    ]);
+                    
+                    // Return the existing connector
+                    $connector = $existingPersonalConnector;
+                }
+            }
+            
+            // Only create if connector still doesn't exist
+            if (!$connector) {
+                // Create connector if it doesn't exist with workspace info
+                $connector = Connector::create([
                     'id' => (string) Str::uuid(),
-                    'user_id' => $userId,
-                    'connector_id' => $connector->id,
-                    'permission_level' => 'admin',
+                    'org_id' => $orgId,
+                    'type' => 'manual_upload',
+                    'label' => 'Manual Upload',
+                    'connection_scope' => $connectionScope,
+                    'workspace_name' => $workspaceName,
+                    'status' => 'connected',
+                    'metadata' => [
+                        'created_at' => now()->toISOString(),
+                        'upload_count' => 0,
+                        'last_upload_at' => null
+                    ]
                 ]);
+                
+                // For personal connectors, create user permission
+                if ($connectionScope === 'personal') {
+                    \App\Models\UserConnectorPermission::create([
+                        'id' => (string) Str::uuid(),
+                        'user_id' => $userId,
+                        'connector_id' => $connector->id,
+                        'permission_level' => 'admin',
+                    ]);
+                }
             }
         }
 
