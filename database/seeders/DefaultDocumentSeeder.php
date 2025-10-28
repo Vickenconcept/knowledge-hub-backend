@@ -44,7 +44,7 @@ class DefaultDocumentSeeder extends Seeder
     /**
      * Create the getting started guide document
      */
-    private function createGettingStartedGuide(Organization $org, EmbeddingService $embeddingService): void
+    private function createGettingStartedGuide(Organization $org, EmbeddingService $embeddingService, string $sourceScope = 'organization'): void
     {
         $guideContent = $this->getGuideContent();
 
@@ -66,6 +66,7 @@ class DefaultDocumentSeeder extends Seeder
             ], // Laravel auto-encodes with cast
             'size' => strlen($guideContent),
             'fetched_at' => now(),
+            'source_scope' => $sourceScope, // Dynamic scope parameter
         ]);
 
         // Chunk the content

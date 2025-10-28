@@ -122,14 +122,70 @@ class VectorStoreService
                 ->whereNotNull('chunks.embedding')
                 ->select('chunks.id', 'chunks.document_id', 'chunks.org_id', 'chunks.embedding');
             
-            // Apply connector filter if provided (join with documents table)
-            if (!empty($filter) && isset($filter['connector_id'])) {
+            // Apply filters (join with documents table for filtering)
+            if (!empty($filter)) {
+                $query->join('documents', 'chunks.document_id', '=', 'documents.id');
+                
+                // Apply connector filter
+                if (isset($filter['connector_id'])) {
                 $connectorIds = $filter['connector_id']['$in'] ?? [$filter['connector_id']];
                 
-                $query->join('documents', 'chunks.document_id', '=', 'documents.id')
-                    ->whereIn('documents.connector_id', $connectorIds);
+                    // Handle null values (system documents) separately
+                    $hasNull = in_array(null, $connectorIds, true);
+                    $nonNullIds = array_filter($connectorIds, function($id) { return $id !== null; });
+                    
+                    // CRITICAL FIX: For organization-scoped documents, we need to include ALL connectors
+                    // that have organization-scoped documents, not just the selected ones
+                    if ($hasNull && !empty($nonNullIds)) {
+                        // Both null and non-null connectors
+                        $query->where(function($q) use ($nonNullIds) {
+                            $q->whereIn('documents.connector_id', $nonNullIds)
+                              ->orWhereNull('documents.connector_id');
+                        });
+                    } elseif ($hasNull) {
+                        // Only null connectors (system documents)
+                        $query->whereNull('documents.connector_id');
+                    } else {
+                        // CRITICAL FIX: For organization documents, include ALL connectors
+                        // This ensures organization-scoped documents are accessible from any connector
+                        $query->where(function($q) use ($nonNullIds) {
+                            $q->whereIn('documents.connector_id', $nonNullIds)
+                              ->orWhere(function($subQ) {
+                                  $subQ->where('chunks.source_scope', 'organization');
+                              });
+                        });
+                    }
+                    
+                    Log::info('📊 Applying connector filter', [
+                        'connector_ids' => $connectorIds,
+                        'has_null' => $hasNull,
+                        'non_null_ids' => $nonNullIds
+                    ]);
+                }
                 
-                Log::info('📊 Applying connector filter', ['connector_ids' => $connectorIds]);
+                // Apply source scope filter (organization vs personal)
+                if (isset($filter['source_scope'])) {
+                    $query->where('chunks.source_scope', $filter['source_scope']);
+                    Log::info('📊 Applying source scope filter', ['source_scope' => $filter['source_scope']]);
+                } elseif (isset($filter['user_id'])) {
+                    // For 'both' scope: include organization docs for all + personal docs for this user
+                    // CRITICAL FIX: Organization documents should be accessible regardless of connector access
+                    $query->where(function($q) use ($filter) {
+                        $q->where('chunks.source_scope', 'organization')
+                          ->orWhere(function($subQ) use ($filter) {
+                              $subQ->where('chunks.source_scope', 'personal')
+                                   ->where('documents.user_id', $filter['user_id']);
+                          });
+                    });
+                    Log::info('📊 Applying mixed scope filter', ['user_id' => $filter['user_id']]);
+                }
+                
+                // Apply workspace name filter
+                if (isset($filter['workspace_name'])) {
+                    $workspaceNames = $filter['workspace_name']['$in'] ?? [$filter['workspace_name']];
+                    $query->whereIn('chunks.workspace_name', $workspaceNames);
+                    Log::info('📊 Applying workspace name filter', ['workspace_names' => $workspaceNames]);
+                }
             }
             
             $chunks = $query->get();

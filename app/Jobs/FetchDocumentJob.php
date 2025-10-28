@@ -35,6 +35,8 @@ class FetchDocumentJob implements ShouldQueue
             'size' => $this->rawDoc['size'] ?? null,
             's3_path' => $this->rawDoc['s3_path'] ?? null,
             'fetched_at' => now(),
+            'source_scope' => $connector->connection_scope, // Use connector's scope
+            'workspace_name' => $connector->workspace_name,
         ]);
 
         // If we have a local temp path, upload raw to Cloudinary and store URL

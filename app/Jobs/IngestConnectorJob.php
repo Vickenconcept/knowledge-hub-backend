@@ -17,6 +17,7 @@ use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\DB;
 
 class IngestConnectorJob implements ShouldQueue
 {
@@ -32,6 +33,8 @@ class IngestConnectorJob implements ShouldQueue
 
     public function handle(): void
     {
+        // Ensure database connections are properly managed
+        DB::connection()->getPdo();
         Log::info('=== IngestConnectorJob STARTED ===', [
             'connector_id' => $this->connectorId,
             'org_id' => $this->orgId
@@ -203,6 +206,9 @@ class IngestConnectorJob implements ShouldQueue
             'total_errors' => $errors,
             'last_synced_at' => $connector->last_synced_at
         ]);
+
+        // Clean up database connections
+        DB::disconnect();
     }
 
     private function processManualUploadFiles($connector, $job, &$docs, &$chunks, &$errors, &$processedFiles, &$skippedFiles)
@@ -240,6 +246,39 @@ class IngestConnectorJob implements ShouldQueue
                 ]);
                 $job->save();
                 break;
+            }
+
+            // Check for duplicate document by content hash
+            $metadata = $document->metadata ?? [];
+            $tmpPath = $metadata['tmp_path'] ?? null;
+            
+            if ($tmpPath && file_exists($tmpPath)) {
+                // Calculate content hash from temp file
+                $contentHash = hash_file('sha256', $tmpPath);
+                
+                // Check if document with same content already exists in the SAME SCOPE
+                $existingDocument = \App\Models\Document::where('org_id', $this->orgId)
+                    ->where('id', '!=', $document->id) // Exclude current document
+                    ->where('sha256', $contentHash)
+                    ->where('source_scope', $document->source_scope) // Only check within same scope
+                    ->first();
+                
+                if ($existingDocument) {
+                    Log::info("⏭️ Duplicate document found, skipping: " . $document->title, [
+                        'document_id' => $document->id,
+                        'existing_document_id' => $existingDocument->id,
+                        'content_hash' => substr($contentHash, 0, 8)
+                    ]);
+                    
+                    // Delete the duplicate document
+                    $document->delete();
+                    $skippedFiles++;
+                    $processedFiles++;
+                    continue;
+                }
+                
+                // Update document with content hash
+                $document->update(['sha256' => $contentHash]);
             }
 
             try {
@@ -353,6 +392,8 @@ class IngestConnectorJob implements ShouldQueue
                         'char_start' => $index * 2000,
                         'char_end' => ($index + 1) * 2000,
                         'token_count' => str_word_count($chunkText),
+                        'source_scope' => $connector->connection_scope, // Use connector's actual scope
+                        'workspace_name' => $connector->workspace_name,
                     ]);
                     $createdChunks[] = $chunk;
                     $chunks++;
@@ -366,6 +407,27 @@ class IngestConnectorJob implements ShouldQueue
 
                 $docs++;
                 $processedFiles++;
+
+                // ✅ Track document ingestion for quota management (only for documents not already tracked)
+                $existingTracking = \App\Models\CostTracking::where('org_id', $this->orgId)
+                    ->where('document_id', $document->id)
+                    ->where('operation_type', 'document_ingestion')
+                    ->first();
+                
+                if (!$existingTracking) {
+                    \App\Services\CostTrackingService::trackDocumentIngestion(
+                        $this->orgId,
+                        $document->id,
+                        $this->connectorId,
+                        $job->id, // ingestJobId
+                        $document->user_id // userId
+                    );
+                } else {
+                    Log::info("Document already tracked for quota, skipping: " . $document->title, [
+                        'document_id' => $document->id,
+                        'existing_tracking_id' => $existingTracking->id
+                    ]);
+                }
 
                 // Update job progress
                 $job->stats = array_merge($job->stats, [
@@ -487,10 +549,11 @@ class IngestConnectorJob implements ShouldQueue
                     ]);
                     $job->save();
 
-                    // Check if document already exists
+                    // Check if document already exists in the SAME SCOPE
                     $existingDocument = \App\Models\Document::where('org_id', $this->orgId)
                         ->where('connector_id', $connector->id)
                         ->where('source_url', $pageUrl)
+                        ->where('source_scope', $connector->connection_scope) // Only check within same scope
                         ->first();
 
                     $text = '';
@@ -646,6 +709,7 @@ class IngestConnectorJob implements ShouldQueue
                             'id' => (string) \Illuminate\Support\Str::uuid(),
                             'org_id' => $this->orgId,
                             'connector_id' => $connector->id,
+                            'user_id' => $connector->getPrimaryUser(), // Track which user owns this connector
                             'title' => $pageTitle,
                             'source_url' => $pageUrl,
                             'mime_type' => 'application/vnd.notion.page',
@@ -654,6 +718,18 @@ class IngestConnectorJob implements ShouldQueue
                             's3_path' => null,
                             'fetched_at' => now(),
                             'doc_type' => 'notion_page',
+                            'source_scope' => $connector->connection_scope, // Use connector's actual scope
+                            'workspace_name' => $connector->workspace_name,
+                        ]);
+                        
+                        Log::info('📄 NOTION DOCUMENT CREATED IN DATABASE', [
+                            'document_id' => $document->id,
+                            'title' => $pageTitle,
+                            'connector_id' => $connector->id,
+                            'connector_scope' => $connector->connection_scope,
+                            'document_source_scope' => $document->source_scope,
+                            'workspace_name' => $connector->workspace_name,
+                            'user_id' => $connector->getPrimaryUser()
                         ]);
                         
                         // Track document ingestion for quota management
@@ -661,7 +737,8 @@ class IngestConnectorJob implements ShouldQueue
                             $this->orgId,
                             $document->id,
                             $this->connectorId,
-                            $job->id
+                            $job->id, // ingestJobId
+                            $document->user_id // userId
                         );
                         
                         Log::info("✅ Notion document created in DB", [
@@ -687,6 +764,8 @@ class IngestConnectorJob implements ShouldQueue
                             'char_start' => $chunkIndex * 2000,
                             'char_end' => ($chunkIndex + 1) * 2000,
                             'token_count' => str_word_count($chunkText),
+                            'source_scope' => $connector->connection_scope, // Use connector's actual scope
+                            'workspace_name' => $connector->workspace_name,
                         ]);
                         $createdChunks[] = $chunk;
                         $chunks++;
@@ -890,6 +969,7 @@ class IngestConnectorJob implements ShouldQueue
                     $existingDocument = \App\Models\Document::where('org_id', $this->orgId)
                         ->where('connector_id', $connector->id)
                         ->where('source_url', $file->getWebViewLink())
+                        ->where('source_scope', $connector->connection_scope) // Only check within same scope
                         ->first();
 
                     // Google Drive provides MD5 hash in metadata (if available)
@@ -1050,6 +1130,7 @@ class IngestConnectorJob implements ShouldQueue
                             'id' => (string) \Illuminate\Support\Str::uuid(),
                     'org_id' => $this->orgId,
                     'connector_id' => $connector->id,
+                            'user_id' => $connector->getPrimaryUser(), // Track which user owns this connector
                             'title' => $file->getName(),
                             'source_url' => $file->getWebViewLink(),
                             'mime_type' => $file->getMimeType(),
@@ -1058,8 +1139,20 @@ class IngestConnectorJob implements ShouldQueue
                             'tags' => $classification['tags'],
                             'sha256' => $contentHash,
                             'size' => strlen($content),
+                            'source_scope' => $connector->connection_scope, // Use connector's actual scope
+                            'workspace_name' => $connector->workspace_name,
                             's3_path' => $cloudinaryUrl, // Store Cloudinary URL
                     'fetched_at' => now(),
+                ]);
+                
+                Log::info('📄 GOOGLE DRIVE DOCUMENT CREATED IN DATABASE', [
+                    'document_id' => $document->id,
+                    'title' => $file->getName(),
+                    'connector_id' => $connector->id,
+                    'connector_scope' => $connector->connection_scope,
+                    'document_source_scope' => $document->source_scope,
+                    'workspace_name' => $connector->workspace_name,
+                    'user_id' => $connector->getPrimaryUser()
                 ]);
                         
                         // ✅ Track document ingestion for quota management
@@ -1067,7 +1160,8 @@ class IngestConnectorJob implements ShouldQueue
                             $this->orgId,
                             $document->id,
                             $this->connectorId,
-                            $job->id
+                            $job->id, // ingestJobId
+                            $document->user_id // userId
                         );
                         
                         Log::info("✅ Document created in DB", [
@@ -1093,6 +1187,8 @@ class IngestConnectorJob implements ShouldQueue
                             'char_start' => $index * 2000, // Approximate
                             'char_end' => ($index + 1) * 2000,
                             'token_count' => str_word_count($chunkText), // Rough estimate
+                            'source_scope' => $connector->connection_scope, // CRITICAL FIX: Add missing source_scope
+                            'workspace_name' => $connector->workspace_name, // CRITICAL FIX: Add missing workspace_name
                         ]);
                         $createdChunks[] = $chunk;
                         $chunks++;
@@ -1194,10 +1290,26 @@ class IngestConnectorJob implements ShouldQueue
                             'chunk_id' => $chunk->id,
                             'document_id' => $chunk->document_id,
                             'org_id' => $chunk->org_id,
-                            'connector_id' => $this->connectorId, // ✅ ADD THIS for source filtering!
+                            'connector_id' => $this->connectorId,
+                            'source_scope' => $chunk->source_scope, // Use the chunk's actual scope
+                            'workspace_name' => $chunk->workspace_name,
                         ]
                     ];
                 }
+                
+                // CRITICAL LOGGING: Track what metadata is being sent to vector store
+                Log::info('🔍 EMBEDDING METADATA BEING SENT TO VECTOR STORE', [
+                    'batch_index' => $batchIndex,
+                    'vectors_count' => count($vectors),
+                    'sample_metadata' => array_slice(array_map(function($v) {
+                        return [
+                            'chunk_id' => $v['id'],
+                            'source_scope' => $v['metadata']['source_scope'],
+                            'workspace_name' => $v['metadata']['workspace_name'],
+                            'connector_id' => $v['metadata']['connector_id']
+                        ];
+                    }, $vectors), 0, 3)
+                ]);
 
                 // Upsert to Pinecone with org_id as namespace and cost tracking
                 $vectorStore->upsert($vectors, $this->orgId, $this->orgId, $documentId, $job->id);
@@ -1376,6 +1488,7 @@ class IngestConnectorJob implements ShouldQueue
                     $existingDocument = \App\Models\Document::where('org_id', $this->orgId)
                         ->where('connector_id', $connector->id)
                         ->where('source_url', $dropboxSourceUrl)
+                        ->where('source_scope', $connector->connection_scope) // Only check within same scope
                         ->first();
 
                     // Dropbox provides modified_time in metadata
@@ -1517,6 +1630,7 @@ class IngestConnectorJob implements ShouldQueue
                             'id' => (string) \Illuminate\Support\Str::uuid(),
                             'org_id' => $this->orgId,
                             'connector_id' => $connector->id,
+                            'user_id' => $connector->getPrimaryUser(), // Track which user owns this connector
                             'title' => $file['name'],
                             'source_url' => $dropboxSourceUrl,
                             'mime_type' => $file['mime_type'],
@@ -1527,6 +1641,18 @@ class IngestConnectorJob implements ShouldQueue
                             'size' => strlen($content),
                             's3_path' => $cloudinaryUrl, // Store Cloudinary URL
                             'fetched_at' => now(),
+                            'source_scope' => $connector->connection_scope, // Use connector's actual scope
+                            'workspace_name' => $connector->workspace_name,
+                        ]);
+                        
+                        Log::info('📄 DROPBOX DOCUMENT CREATED IN DATABASE', [
+                            'document_id' => $document->id,
+                            'title' => $file['name'],
+                            'connector_id' => $connector->id,
+                            'connector_scope' => $connector->connection_scope,
+                            'document_source_scope' => $document->source_scope,
+                            'workspace_name' => $connector->workspace_name,
+                            'user_id' => $connector->getPrimaryUser()
                         ]);
                         
                         // ✅ Track document ingestion for quota management
@@ -1534,7 +1660,8 @@ class IngestConnectorJob implements ShouldQueue
                             $this->orgId,
                             $document->id,
                             $this->connectorId,
-                            $job->id
+                            $job->id, // ingestJobId
+                            $document->user_id // userId
                         );
                         
                         Log::info("✅ Document created in DB", [
@@ -1560,6 +1687,8 @@ class IngestConnectorJob implements ShouldQueue
                             'char_start' => $index * 2000, // Approximate
                             'char_end' => ($index + 1) * 2000,
                             'token_count' => str_word_count($chunkText), // Rough estimate
+                            'source_scope' => $connector->connection_scope, // CRITICAL FIX: Add missing source_scope
+                            'workspace_name' => $connector->workspace_name, // CRITICAL FIX: Add missing workspace_name
                         ]);
                         $createdChunks[] = $chunk;
                         $chunks++;
@@ -2182,11 +2311,13 @@ class IngestConnectorJob implements ShouldQueue
         }
         
         // ========================================
-        // Check if conversation document already exists
+        // Check if conversation document already exists in the SAME SCOPE
         // ========================================
+        $connector = \App\Models\Connector::find($this->connectorId);
         $existingDoc = \App\Models\Document::where('org_id', $this->orgId)
             ->where('connector_id', $this->connectorId)
             ->where('external_id', $externalId)
+            ->where('source_scope', $connector->connection_scope) // Only check within same scope
             ->first();
         
         // Check if existing document has reached limits (for channels only, not threads)
@@ -2353,6 +2484,7 @@ class IngestConnectorJob implements ShouldQueue
             $document = \App\Models\Document::create([
                 'org_id' => $this->orgId,
                 'connector_id' => $this->connectorId,
+                'user_id' => $connector->getPrimaryUser(), // Track which user owns this connector
                 'external_id' => $externalId,
                 'title' => $newTitle,
                 'source_url' => $permalink,
@@ -2362,6 +2494,8 @@ class IngestConnectorJob implements ShouldQueue
                 'tags' => $classification['tags'],
                 's3_path' => $cloudinaryUrl,
                 'sha256' => hash('sha256', $content),
+                'source_scope' => $connector->connection_scope, // Use connector's actual scope
+                'workspace_name' => $connector->workspace_name,
                 'metadata' => array_merge($classification['metadata'], [
                     'channel_id' => $channelId,
                     'channel_name' => $channelName,
@@ -2386,6 +2520,17 @@ class IngestConnectorJob implements ShouldQueue
                     'source_platform' => 'slack',
                 ]),
                 'fetched_at' => now(),
+            ]);
+            
+            Log::info('📄 SLACK CONVERSATION DOCUMENT CREATED IN DATABASE', [
+                'document_id' => $document->id,
+                'title' => $newTitle,
+                'connector_id' => $this->connectorId,
+                'connector_scope' => $connector->connection_scope,
+                'document_source_scope' => $document->source_scope,
+                'workspace_name' => $connector->workspace_name,
+                'user_id' => $connector->getPrimaryUser(),
+                'channel_name' => $channelName
             ]);
             
             // ✅ Track document ingestion for quota management
@@ -2432,6 +2577,8 @@ class IngestConnectorJob implements ShouldQueue
                 'chunk_index' => $index,
                 'text' => $chunkText,  // ← Fixed: use 'text' not 'content'
                 'token_count' => (int)(str_word_count($chunkText) * 1.3),
+                'source_scope' => $connector->connection_scope, // CRITICAL FIX: Add missing source_scope
+                'workspace_name' => $connector->workspace_name, // CRITICAL FIX: Add missing workspace_name
             ]);
             $chunkObjects[] = $chunkObj;
             $chunks++; // Increment chunk counter
@@ -2441,6 +2588,15 @@ class IngestConnectorJob implements ShouldQueue
             'document_id' => $document->id,
             'chunk_count' => count($chunkObjects),
             'total_content_length' => strlen($conversationContent),
+            'connector_scope' => $connector->connection_scope,
+            'workspace_name' => $connector->workspace_name,
+            'chunk_scopes' => array_map(function($chunk) {
+                return [
+                    'chunk_id' => $chunk->id,
+                    'source_scope' => $chunk->source_scope,
+                    'workspace_name' => $chunk->workspace_name
+                ];
+            }, $chunkObjects)
         ]);
         
         // Use the same embedding method as Google Drive/Dropbox
@@ -2507,9 +2663,11 @@ class IngestConnectorJob implements ShouldQueue
                 // ========================================
                 // Check for existing document (same as Google Drive/Dropbox)
                 // ========================================
+                $connector = \App\Models\Connector::find($this->connectorId);
                 $existingFileDoc = \App\Models\Document::where('org_id', $this->orgId)
                     ->where('connector_id', $this->connectorId)
                     ->where('external_id', 'slack_file_' . $fileId)
+                    ->where('source_scope', $connector->connection_scope) // Only check within same scope
                     ->first();
                 
                 Log::info("Downloading Slack file", [
@@ -2768,6 +2926,7 @@ class IngestConnectorJob implements ShouldQueue
                     $fileDocument = \App\Models\Document::create([
                         'org_id' => $this->orgId,
                         'connector_id' => $this->connectorId,
+                        'user_id' => $connector->getPrimaryUser(), // Track which user owns this connector
                         'external_id' => 'slack_file_' . $fileId,
                         'title' => $fileName,
                         'source_url' => $fileUrl,
@@ -2777,6 +2936,8 @@ class IngestConnectorJob implements ShouldQueue
                         'tags' => $fileClassification['tags'],
                         's3_path' => $fileCloudinaryUrl,
                         'sha256' => $contentHash,
+                        'source_scope' => $connector->connection_scope, // Use connector's actual scope
+                        'workspace_name' => $connector->workspace_name,
                         'metadata' => array_merge($fileClassification['metadata'], [
                             'shared_in_slack' => true,
                             'channel_name' => $channelName,
@@ -2789,6 +2950,17 @@ class IngestConnectorJob implements ShouldQueue
                             'is_downloadable' => true,
                         ]),
                         'fetched_at' => now(),
+                    ]);
+                    
+                    Log::info('📄 SLACK FILE DOCUMENT CREATED IN DATABASE', [
+                        'document_id' => $fileDocument->id,
+                        'title' => $fileName,
+                        'connector_id' => $this->connectorId,
+                        'connector_scope' => $connector->connection_scope,
+                        'document_source_scope' => $fileDocument->source_scope,
+                        'workspace_name' => $connector->workspace_name,
+                        'user_id' => $connector->getPrimaryUser(),
+                        'file_id' => $fileId
                     ]);
                     
                     // ✅ Track document ingestion for quota management
@@ -2819,8 +2991,10 @@ class IngestConnectorJob implements ShouldQueue
                         'text' => $chunkText,
                         'char_start' => $index * 2000,
                         'char_end' => ($index + 1) * 2000,
-                        'token_count' => str_word_count($chunkText),
-                    ]);
+                            'token_count' => str_word_count($chunkText),
+                            'source_scope' => $connector->connection_scope, // Use connector's actual scope
+                            'workspace_name' => $connector->workspace_name,
+                        ]);
                     $createdChunks[] = $chunk;
                     $chunks++;
                 }

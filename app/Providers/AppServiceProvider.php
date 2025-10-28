@@ -28,6 +28,10 @@ class AppServiceProvider extends ServiceProvider
         if (config('database.default') === 'mysql') {
             $this->configureMySQLCharset();
         }
+
+        app()->terminating(function () {
+            DB::disconnect();
+        });
     }
 
     /**

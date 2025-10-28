@@ -51,6 +51,7 @@ class CostTrackingService
             'cost_usd' => $cost,
             'document_id' => $documentId,
             'ingest_job_id' => $ingestJobId,
+            'query_text' => null, // Embedding operations don't have query text
         ]);
         
         Log::info('Cost tracked: embedding', [
@@ -322,7 +323,8 @@ class CostTrackingService
         string $orgId,
         string $documentId,
         ?string $connectorId = null,
-        ?string $ingestJobId = null
+        ?string $ingestJobId = null,
+        ?string $userId = null
     ): void {
         // No direct cost, but we track for quota enforcement
         // Each document ingestion counts toward monthly limit
@@ -339,12 +341,16 @@ class CostTrackingService
             'cost_usd' => $cost,
             'document_id' => $documentId,
             'ingest_job_id' => $ingestJobId,
-            'metadata' => json_encode(['connector_id' => $connectorId]),
+            'metadata' => json_encode([
+                'connector_id' => $connectorId,
+                'user_id' => $userId
+            ]),
         ]);
         
         Log::debug('Tracked document ingestion for quota', [
             'org_id' => $orgId,
             'document_id' => $documentId,
+            'user_id' => $userId,
         ]);
     }
 }

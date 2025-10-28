@@ -30,35 +30,47 @@ class SlackController extends BaseConnectorController
      */
     public function getAuthUrl(Request $request)
     {
-        $slack = new SlackService();
+        $user = $request->user();
+        $orgId = $user->org_id;
 
-        // Check if Slack connector already exists for this organization
-        $existingConnector = Connector::where('org_id', $request->user()->org_id)
+        // Get connector ID from request (passed from frontend)
+        $connectorId = $request->get('connector_id');
+        
+        if (!$connectorId) {
+            return response()->json([
+                'error' => 'Connector ID is required for Slack OAuth'
+            ], 400);
+        }
+
+        // Verify connector exists and belongs to user's org
+        $connector = Connector::where('id', $connectorId)
+            ->where('org_id', $orgId)
             ->where('type', 'slack')
             ->first();
 
-        if ($existingConnector) {
-            // Update existing connector if it's disconnected
-            if ($existingConnector->status === 'disconnected') {
-                $connector = $existingConnector;
-            } else {
+        if (!$connector) {
                 return response()->json([
-                    'message' => 'Slack is already connected for this organization'
-                ], 409);
-            }
-        } else {
-            // Create a new connector record
-            $connector = Connector::create([
-                'id' => (string) Str::uuid(),
-                'org_id' => $request->user()->org_id,
-                'type' => 'slack',
-                'label' => 'Slack',
-                'status' => 'disconnected',
-            ]);
+                'error' => 'Connector not found or access denied'
+            ], 404);
         }
 
-        // State can include connector id to reconcile on callback
-        $state = base64_encode(json_encode(['connector_id' => $connector->id]));
+        $slack = new SlackService();
+
+        // State includes connector id and scope for proper routing
+        $state = base64_encode(json_encode([
+            'connector_id' => $connector->id,
+            'connection_scope' => $connector->connection_scope,
+            'workspace_name' => $connector->workspace_name,
+        ]));
+
+        Log::info('🚀 SLACK OAUTH STARTED', [
+            'connector_id' => $connector->id,
+            'connection_scope' => $connector->connection_scope,
+            'workspace_name' => $connector->workspace_name,
+            'user_id' => $user->id,
+            'org_id' => $orgId,
+            'access_type' => $connector->connection_scope === 'personal' ? '👤 PERSONAL' : '🏢 ORGANIZATION'
+        ]);
 
         return response()->json([
             'connector_id' => $connector->id,
@@ -85,6 +97,8 @@ class SlackController extends BaseConnectorController
 
         $state = json_decode(base64_decode($stateB64), true) ?: [];
         $connectorId = $state['connector_id'] ?? null;
+        $connectionScope = $state['connection_scope'] ?? null;
+        $workspaceName = $state['workspace_name'] ?? null;
         
         if (!$connectorId) {
             return $this->redirectToFrontend(false, 'invalid_state');
@@ -96,16 +110,28 @@ class SlackController extends BaseConnectorController
             return $this->redirectToFrontend(false, 'connector_not_found');
         }
 
+        Log::info('🔗 SLACK OAUTH CALLBACK STARTED', [
+            'connector_id' => $connectorId,
+            'connection_scope' => $connectionScope,
+            'workspace_name' => $workspaceName,
+            'connector_scope' => $connector->connection_scope,
+            'user_id' => $user->id ?? null,
+            'org_id' => $connector->org_id
+        ]);
+
         try {
             $slack = new SlackService();
             
             // Exchange code for access token
             $tokenData = $slack->exchangeCode($code);
             
-            Log::info('Slack OAuth token exchange successful', [
+            Log::info('✅ SLACK TOKEN EXCHANGE SUCCESSFUL', [
                 'connector_id' => $connector->id,
                 'team_id' => $tokenData['team_id'],
                 'team_name' => $tokenData['team_name'],
+                'connection_scope' => $connector->connection_scope,
+                'workspace_name' => $connector->workspace_name,
+                'access_type' => $connector->connection_scope === 'personal' ? '👤 PERSONAL' : '🏢 ORGANIZATION'
             ]);
 
             // Get team info
@@ -131,9 +157,17 @@ class SlackController extends BaseConnectorController
             $connector->status = 'connected';
             $connector->save();
 
-            Log::info('Slack connector saved successfully', [
+            Log::info('🎉 SLACK CONNECTOR CONNECTED SUCCESSFULLY', [
                 'connector_id' => $connector->id,
                 'status' => $connector->status,
+                'connection_scope' => $connector->connection_scope,
+                'workspace_name' => $connector->workspace_name,
+                'team_name' => $tokenData['team_name'],
+                'team_id' => $tokenData['team_id'],
+                'access_type' => $connector->connection_scope === 'personal' ? '👤 PERSONAL WORKSPACE' : '🏢 ORGANIZATION WORKSPACE',
+                'workspace_access' => $connector->connection_scope === 'personal' 
+                    ? 'Personal channels, DMs, and files only' 
+                    : 'Team channels, shared files, and team resources'
             ]);
 
             return $this->redirectToFrontend(true);

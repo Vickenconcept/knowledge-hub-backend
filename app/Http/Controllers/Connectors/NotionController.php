@@ -42,10 +42,34 @@ class NotionController extends BaseConnectorController
             ], 500);
         }
 
+        // Get connector ID from request (passed from frontend)
+        $connectorId = $request->get('connector_id');
+        
+        if (!$connectorId) {
+            return response()->json([
+                'error' => 'Connector ID is required for Notion OAuth'
+            ], 400);
+        }
+
+        // Verify connector exists and belongs to user's org
+        $connector = Connector::where('id', $connectorId)
+            ->where('org_id', $orgId)
+            ->where('type', 'notion')
+            ->first();
+
+        if (!$connector) {
+            return response()->json([
+                'error' => 'Connector not found or access denied'
+            ], 404);
+        }
+
         // Generate state token for security
         $state = base64_encode(json_encode([
             'org_id' => $orgId,
             'user_id' => $user->id,
+            'connector_id' => $connectorId,
+            'connection_scope' => $connector->connection_scope,
+            'workspace_name' => $connector->workspace_name,
             'timestamp' => time(),
         ]));
 
@@ -57,9 +81,13 @@ class NotionController extends BaseConnectorController
             'state' => $state,
         ]);
 
-        Log::info('Notion OAuth URL generated', [
+        Log::info('🚀 NOTION OAUTH STARTED', [
             'org_id' => $orgId,
             'user_id' => $user->id,
+            'connector_id' => $connectorId,
+            'connection_scope' => $connector->connection_scope,
+            'workspace_name' => $connector->workspace_name,
+            'access_type' => $connector->connection_scope === 'personal' ? '👤 PERSONAL' : '🏢 ORGANIZATION'
         ]);
 
         return response()->json([
@@ -92,6 +120,32 @@ class NotionController extends BaseConnectorController
             $stateData = json_decode(base64_decode($state), true);
             $orgId = $stateData['org_id'];
             $userId = $stateData['user_id'];
+            $connectorId = $stateData['connector_id'];
+            $connectionScope = $stateData['connection_scope'] ?? null;
+            $workspaceName = $stateData['workspace_name'] ?? null;
+
+            // Find the specific connector by ID
+            $connector = Connector::where('id', $connectorId)
+                ->where('org_id', $orgId)
+                ->where('type', 'notion')
+                ->first();
+
+            if (!$connector) {
+                Log::error('Notion connector not found', [
+                    'connector_id' => $connectorId,
+                    'org_id' => $orgId
+                ]);
+                return redirect(config('app.frontend_url') . '/connectors?error=connector_not_found');
+            }
+
+            Log::info('🔗 NOTION OAUTH CALLBACK STARTED', [
+                'connector_id' => $connectorId,
+                'connection_scope' => $connectionScope,
+                'workspace_name' => $workspaceName,
+                'connector_scope' => $connector->connection_scope,
+                'user_id' => $userId,
+                'org_id' => $orgId
+            ]);
 
             // Exchange code for tokens
             $credentials = base64_encode(env('NOTION_CLIENT_ID') . ':' . env('NOTION_CLIENT_SECRET'));
@@ -117,29 +171,41 @@ class NotionController extends BaseConnectorController
 
             $tokenData = $response->json();
 
-            Log::info('Notion token exchange successful', [
+            Log::info('✅ NOTION TOKEN EXCHANGE SUCCESSFUL', [
                 'has_access_token' => isset($tokenData['access_token']),
                 'workspace_name' => $tokenData['workspace_name'] ?? null,
+                'workspace_id' => $tokenData['workspace_id'] ?? null,
+                'connection_scope' => $connector->connection_scope,
+                'access_type' => $connector->connection_scope === 'personal' ? '👤 PERSONAL' : '🏢 ORGANIZATION'
             ]);
 
-            // Extract workspace name for label
-            $workspaceName = $tokenData['workspace_name'] ?? 'Notion';
+            // Update the specific connector with tokens and workspace info
+            $connector->encrypted_tokens = encrypt(json_encode($tokenData));
+            $connector->status = 'connected';
+            $connector->label = $tokenData['workspace_name'] ?? 'Notion';
+            $connector->metadata = [
+                'workspace_name' => $tokenData['workspace_name'] ?? '',
+                'workspace_id' => $tokenData['workspace_id'] ?? '',
+                'workspace_icon' => $tokenData['workspace_icon'] ?? '',
+                'bot_id' => $tokenData['bot_id'] ?? '',
+                'owner_type' => $tokenData['owner']['type'] ?? '',
+                'owner_user' => $tokenData['owner']['user'] ?? null,
+                'connected_at' => now()->toIso8601String(),
+            ];
+            $connector->save();
 
-            // Create or update connector
-            $connector = $this->createOrUpdateConnector(
-                $orgId,
-                $tokenData,
-                [
-                    'workspace_name' => $tokenData['workspace_name'] ?? '',
-                    'workspace_id' => $tokenData['workspace_id'] ?? '',
-                    'workspace_icon' => $tokenData['workspace_icon'] ?? '',
-                    'bot_id' => $tokenData['bot_id'] ?? '',
-                    'owner_type' => $tokenData['owner']['type'] ?? '',
-                    'owner_user' => $tokenData['owner']['user'] ?? null,
-                    'connected_at' => now()->toIso8601String(),
-                ],
-                $workspaceName // Pass workspace name as label
-            );
+            Log::info('🎉 NOTION CONNECTOR CONNECTED SUCCESSFULLY', [
+                'connector_id' => $connector->id,
+                'org_id' => $orgId,
+                'connection_scope' => $connector->connection_scope,
+                'workspace_name' => $connector->workspace_name,
+                'notion_workspace_name' => $tokenData['workspace_name'] ?? 'Notion',
+                'notion_workspace_id' => $tokenData['workspace_id'] ?? null,
+                'access_type' => $connector->connection_scope === 'personal' ? '👤 PERSONAL WORKSPACE' : '🏢 ORGANIZATION WORKSPACE',
+                'workspace_access' => $connector->connection_scope === 'personal' 
+                    ? 'Personal pages, databases, and templates only' 
+                    : 'Team pages, shared databases, and team resources'
+            ]);
 
             return redirect(config('app.frontend_url') . '/connectors?success=notion_connected');
 

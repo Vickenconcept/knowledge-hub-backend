@@ -115,6 +115,7 @@ class ProcessLargeFileJob implements ShouldQueue
                 Log::info('Large file updated', ['name' => $this->fileData['name']]);
             } else {
                 // Create new document
+                $connector = \App\Models\Connector::find($this->connectorId);
                 $document = Document::create([
                     'id' => (string) Str::uuid(),
                     'org_id' => $this->orgId,
@@ -126,6 +127,8 @@ class ProcessLargeFileJob implements ShouldQueue
                     'size' => strlen($content),
                     's3_path' => null,
                     'fetched_at' => now(),
+                    'source_scope' => $connector ? $connector->connection_scope : 'personal', // Use connector's scope
+                    'workspace_name' => $connector ? $connector->workspace_name : null,
                 ]);
                 Log::info('Large file document created', ['name' => $this->fileData['name']]);
             }
@@ -281,7 +284,9 @@ class ProcessLargeFileJob implements ShouldQueue
                             'chunk_id' => $chunk->id,
                             'document_id' => $chunk->document_id,
                             'org_id' => $chunk->org_id,
-                            'connector_id' => $this->connectorId, // ✅ ADD THIS for source filtering!
+                            'connector_id' => $this->connectorId,
+                            'source_scope' => $chunk->source_scope, // Use the chunk's actual scope
+                            'workspace_name' => $chunk->workspace_name,
                         ]
                     ];
                 }

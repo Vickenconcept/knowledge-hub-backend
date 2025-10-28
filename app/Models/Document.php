@@ -14,7 +14,7 @@ class Document extends Model
     protected $keyType = 'string';
 
     protected $fillable = [
-        'id', 'org_id', 'connector_id', 'external_id', 'title', 'source_url', 'mime_type', 'doc_type', 'metadata', 'summary', 'tags', 'sha256', 'size', 's3_path', 'fetched_at'
+        'id', 'org_id', 'connector_id', 'user_id', 'external_id', 'title', 'source_url', 'mime_type', 'doc_type', 'metadata', 'summary', 'tags', 'sha256', 'size', 's3_path', 'fetched_at', 'source_scope', 'workspace_name'
     ];
 
     protected $casts = [

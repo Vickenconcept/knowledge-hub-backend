@@ -14,7 +14,7 @@ class OnboardingService
     /**
      * Create getting started guide for a new organization
      */
-    public static function createGettingStartedGuide(Organization $organization): void
+    public static function createGettingStartedGuide(Organization $organization, string $sourceScope = 'organization'): void
     {
         try {
             $guideContent = self::getGuideContent();
@@ -37,6 +37,7 @@ class OnboardingService
                 'created_for' => 'new_user_onboarding',
             ], // Laravel auto-encodes with cast
                 'size' => strlen($guideContent),
+                'source_scope' => $sourceScope, // Dynamic scope parameter
                 'fetched_at' => now(),
             ]);
 
@@ -54,6 +55,8 @@ class OnboardingService
                     'char_start' => 0,
                     'char_end' => strlen($chunkText),
                     'token_count' => str_word_count($chunkText),
+                    'source_scope' => $sourceScope, // CRITICAL FIX: Set source_scope on chunks
+                    'workspace_name' => 'Getting Started Guide',
                 ]);
 
                 // Generate and store embedding

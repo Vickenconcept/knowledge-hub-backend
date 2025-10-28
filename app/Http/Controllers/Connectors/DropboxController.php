@@ -44,10 +44,32 @@ class DropboxController extends BaseConnectorController
             ], 500);
         }
 
+        // Get connector ID from request (passed from frontend)
+        $connectorId = $request->get('connector_id');
+        
+        if (!$connectorId) {
+            return response()->json([
+                'error' => 'Connector ID is required for Dropbox OAuth'
+            ], 400);
+        }
+
+        // Verify connector exists and belongs to user's org
+        $connector = Connector::where('id', $connectorId)
+            ->where('org_id', $orgId)
+            ->where('type', 'dropbox')
+            ->first();
+
+        if (!$connector) {
+            return response()->json([
+                'error' => 'Connector not found or access denied'
+            ], 404);
+        }
+
         // Generate state token for security
         $state = base64_encode(json_encode([
             'org_id' => $orgId,
             'user_id' => $user->id,
+            'connector_id' => $connectorId,
             'timestamp' => time(),
         ]));
 
@@ -57,6 +79,15 @@ class DropboxController extends BaseConnectorController
             'redirect_uri' => $redirectUri,
             'state' => $state,
             'token_access_type' => 'offline', // Request refresh token
+        ]);
+
+        Log::info('🚀 DROPBOX OAUTH STARTED', [
+            'connector_id' => $connector->id,
+            'connection_scope' => $connector->connection_scope,
+            'workspace_name' => $connector->workspace_name,
+            'user_id' => $user->id,
+            'org_id' => $orgId,
+            'access_type' => $connector->connection_scope === 'personal' ? '👤 PERSONAL' : '🏢 ORGANIZATION'
         ]);
 
         return response()->json([
@@ -89,6 +120,7 @@ class DropboxController extends BaseConnectorController
             $stateData = json_decode(base64_decode($state), true);
             $orgId = $stateData['org_id'];
             $userId = $stateData['user_id'];
+            $connectorId = $stateData['connector_id'];
 
             // Exchange code for tokens
             $response = Http::asForm()
@@ -131,11 +163,11 @@ class DropboxController extends BaseConnectorController
                                    $accountInfo['email'] ?? 
                                    'Dropbox';
                     
-                    Log::info('Dropbox account info retrieved', [
-                        'account_name' => $accountName,
-                        'email' => $accountInfo['email'] ?? null,
-                        'account_info' => $accountInfo,
-                    ]);
+            Log::info('✅ DROPBOX ACCOUNT INFO RETRIEVED', [
+                'account_name' => $accountName,
+                'email' => $accountInfo['email'] ?? null,
+                'account_id' => $accountInfo['account_id'] ?? null,
+            ]);
                 } else {
                     Log::warning('Dropbox account info request failed', [
                         'status' => $accountResponse->status(),
@@ -148,45 +180,44 @@ class DropboxController extends BaseConnectorController
                 ]);
             }
 
-            // Check if connector already exists
-            $connector = Connector::where('org_id', $orgId)
+            // Find the specific connector by ID
+            $connector = Connector::where('id', $connectorId)
+                ->where('org_id', $orgId)
                 ->where('type', 'dropbox')
                 ->first();
 
-            if ($connector) {
-                // Update existing connector
-                $connector->update([
-                    'encrypted_tokens' => encrypt(json_encode($tokenData)),
-                    'status' => 'connected',
-                    'label' => $accountName,
-                    'metadata' => json_encode([
-                        'connected_at' => now()->toIso8601String(),
-                        'account_id' => $accountInfo['account_id'] ?? null,
-                        'email' => $accountInfo['email'] ?? null,
-                        'display_name' => $accountName,
-                    ]),
+            if (!$connector) {
+                Log::error('Dropbox connector not found', [
+                    'connector_id' => $connectorId,
+                    'org_id' => $orgId
                 ]);
-            } else {
-                // Create new connector
-                $connector = Connector::create([
-                    'id' => (string) Str::uuid(),
-                    'org_id' => $orgId,
-                    'type' => 'dropbox',
-                    'label' => $accountName,
-                    'status' => 'connected',
-                    'encrypted_tokens' => encrypt(json_encode($tokenData)),
-                    'metadata' => json_encode([
-                        'connected_at' => now()->toIso8601String(),
-                        'account_id' => $accountInfo['account_id'] ?? null,
-                        'email' => $accountInfo['email'] ?? null,
-                        'display_name' => $accountName,
-                    ]),
-                ]);
+                return redirect(config('app.frontend_url') . '/connectors?error=connector_not_found');
             }
 
-            Log::info('Dropbox connector created/updated', [
+            // Update the specific connector with tokens and account info
+            $connector->update([
+                'encrypted_tokens' => encrypt(json_encode($tokenData)),
+                'status' => 'connected',
+                'label' => $accountName,
+                'metadata' => json_encode([
+                    'connected_at' => now()->toIso8601String(),
+                    'account_id' => $accountInfo['account_id'] ?? null,
+                    'email' => $accountInfo['email'] ?? null,
+                    'display_name' => $accountName,
+                ]),
+            ]);
+
+            Log::info('🎉 DROPBOX CONNECTOR CONNECTED SUCCESSFULLY', [
                 'connector_id' => $connector->id,
                 'org_id' => $orgId,
+                'connection_scope' => $connector->connection_scope,
+                'workspace_name' => $connector->workspace_name,
+                'account_name' => $accountName,
+                'account_email' => $accountInfo['email'] ?? null,
+                'access_type' => $connector->connection_scope === 'personal' ? '👤 PERSONAL WORKSPACE' : '🏢 ORGANIZATION WORKSPACE',
+                'workspace_access' => $connector->connection_scope === 'personal' 
+                    ? 'Personal files and folders only' 
+                    : 'Personal files + shared folders + team folders + external collaborations'
             ]);
 
             return redirect(config('app.frontend_url') . '/connectors?dropbox_connected=true');

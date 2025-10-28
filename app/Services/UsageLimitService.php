@@ -232,6 +232,48 @@ class UsageLimitService
     }
     
     /**
+     * Get user-specific document counts
+     */
+    public static function getUserDocumentCounts(string $orgId, string $userId): array
+    {
+        // Count documents uploaded by this specific user
+        $userDocumentCount = DB::table('documents')
+            ->where('org_id', $orgId)
+            ->where('user_id', $userId)
+            ->where(function($query) {
+                $query->where('doc_type', '!=', 'guide')
+                      ->orWhereNull('doc_type');
+            })
+            ->count();
+        
+        // Count monthly ingestion by this user
+        $userMonthlyIngestion = DB::table('cost_tracking')
+            ->where('org_id', $orgId)
+            ->where('operation_type', 'document_ingestion')
+            ->where('created_at', '>=', now()->startOfMonth())
+            ->whereRaw('JSON_EXTRACT(metadata, "$.user_id") = ?', [$userId])
+            ->count();
+        
+        // Fallback: if no cost_tracking records, count from documents table
+        if ($userMonthlyIngestion === 0) {
+            $userMonthlyIngestion = DB::table('documents')
+                ->where('org_id', $orgId)
+                ->where('user_id', $userId)
+                ->where('created_at', '>=', now()->startOfMonth())
+                ->where(function($query) {
+                    $query->where('doc_type', '!=', 'guide')
+                          ->orWhereNull('doc_type');
+                })
+                ->count();
+        }
+        
+        return [
+            'current_documents' => $userDocumentCount,
+            'monthly_ingestion' => $userMonthlyIngestion,
+        ];
+    }
+    
+    /**
      * Get comprehensive usage status for organization
      */
     public static function getUsageStatus(string $orgId): array

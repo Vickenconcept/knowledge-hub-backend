@@ -14,7 +14,7 @@ class Chunk extends Model
     protected $keyType = 'string';
 
     protected $fillable = [
-        'id', 'document_id', 'org_id', 'chunk_index', 'text', 'char_start', 'char_end', 'token_count'
+        'id', 'document_id', 'org_id', 'chunk_index', 'text', 'char_start', 'char_end', 'token_count', 'source_scope', 'workspace_name'
     ];
 
     protected static function booted(): void
