@@ -58,25 +58,40 @@ class ManualUploadController extends BaseConnectorController
             ->first();
 
         if (!$orgConnector) {
-            // Create organization connector (first user in org)
-            $orgConnector = Connector::create([
-                'id' => (string) Str::uuid(),
-                'org_id' => $orgId,
-                'type' => 'manual_upload',
-                'label' => 'Manual Upload',
-                'connection_scope' => 'organization',
-                'workspace_name' => null,
-                'status' => 'connected',
-                'metadata' => [
-                    'created_at' => now()->toISOString(),
-                    'upload_count' => 0,
-                    'last_upload_at' => null
-                ]
-            ]);
-            $createdConnectors[] = $orgConnector;
-            \Log::info('Created organization Manual Upload connector (first user)', [
-                'connector_id' => $orgConnector->id
-            ]);
+            try {
+                // Create organization connector (first user in org)
+                $orgConnector = Connector::create([
+                    'id' => (string) Str::uuid(),
+                    'org_id' => $orgId,
+                    'type' => 'manual_upload',
+                    'label' => 'Manual Upload',
+                    'connection_scope' => 'organization',
+                    'workspace_name' => null,
+                    'status' => 'connected',
+                    'metadata' => [
+                        'created_at' => now()->toISOString(),
+                        'upload_count' => 0,
+                        'last_upload_at' => null
+                    ]
+                ]);
+                $createdConnectors[] = $orgConnector;
+                \Log::info('Created organization Manual Upload connector (first user)', [
+                    'connector_id' => $orgConnector->id
+                ]);
+            } catch (\Exception $e) {
+                // Race condition: another request created it between our check and creation
+                \Log::warning('Race condition detected when creating org connector', [
+                    'error' => $e->getMessage()
+                ]);
+                // Reload the connector that was just created
+                $orgConnector = Connector::where('org_id', $orgId)
+                    ->where('type', 'manual_upload')
+                    ->where('connection_scope', 'organization')
+                    ->first();
+                if ($orgConnector) {
+                    $existingConnectors[] = $orgConnector;
+                }
+            }
         } else {
             $existingConnectors[] = $orgConnector;
             \Log::info('Organization Manual Upload connector already exists', [
@@ -85,44 +100,108 @@ class ManualUploadController extends BaseConnectorController
         }
 
         // Check if personal Manual Upload connector exists for this user
-        $personalConnector = Connector::where('org_id', $orgId)
+        // IMPORTANT: We check first if ANY personal connector exists for this user
+        // to prevent duplicates when multiple requests come in simultaneously
+        $existingPersonalConnectors = Connector::where('org_id', $orgId)
             ->where('type', 'manual_upload')
             ->where('connection_scope', 'personal')
             ->whereHas('userPermissions', function($query) use ($userId) {
                 $query->where('user_id', $userId);
             })
-            ->first();
+            ->get();
+        
+        // If multiple personal connectors exist, keep only the first one and delete the rest
+        if ($existingPersonalConnectors->count() > 1) {
+            \Log::warning('Multiple personal connectors found for user, cleaning up duplicates', [
+                'user_id' => $userId,
+                'org_id' => $orgId,
+                'count' => $existingPersonalConnectors->count()
+            ]);
+            
+            // Keep the first one, delete the rest
+            $personalConnector = $existingPersonalConnectors->first();
+            $duplicates = $existingPersonalConnectors->slice(1);
+            
+            foreach ($duplicates as $duplicate) {
+                \Log::info('Deleting duplicate personal connector', [
+                    'connector_id' => $duplicate->id,
+                    'user_id' => $userId
+                ]);
+                
+                // Delete associated documents and chunks first
+                foreach ($duplicate->documents as $document) {
+                    $chunkIds = \App\Models\Chunk::where('document_id', $document->id)->pluck('id')->all();
+                    if (!empty($chunkIds)) {
+                        try {
+                            $vectorStore = new \App\Services\VectorStoreService();
+                            $vectorStore->delete($chunkIds);
+                        } catch (\Exception $e) {
+                            \Log::warning('Failed to delete vectors', ['error' => $e->getMessage()]);
+                        }
+                    }
+                    \App\Models\Chunk::where('document_id', $document->id)->delete();
+                    $document->delete();
+                }
+                
+                // Delete user permissions
+                \App\Models\UserConnectorPermission::where('connector_id', $duplicate->id)->delete();
+                
+                // Delete the connector
+                $duplicate->delete();
+            }
+        } else {
+            $personalConnector = $existingPersonalConnectors->first();
+        }
 
         if (!$personalConnector) {
-            // Create personal connector for this user
-            $personalConnector = Connector::create([
-                'id' => (string) Str::uuid(),
-                'org_id' => $orgId,
-                'type' => 'manual_upload',
-                'label' => 'Manual Upload',
-                'connection_scope' => 'personal',
-                'workspace_name' => 'My Personal Uploads',
-                'status' => 'connected',
-                'metadata' => [
-                    'created_at' => now()->toISOString(),
-                    'upload_count' => 0,
-                    'last_upload_at' => null
-                ]
-            ]);
+            try {
+                // Create personal connector for this user
+                $personalConnector = Connector::create([
+                    'id' => (string) Str::uuid(),
+                    'org_id' => $orgId,
+                    'type' => 'manual_upload',
+                    'label' => 'Manual Upload',
+                    'connection_scope' => 'personal',
+                    'workspace_name' => 'My Personal Uploads',
+                    'status' => 'connected',
+                    'metadata' => [
+                        'created_at' => now()->toISOString(),
+                        'upload_count' => 0,
+                        'last_upload_at' => null
+                    ]
+                ]);
 
-            // Create user permission for personal connector
-            \App\Models\UserConnectorPermission::create([
-                'id' => (string) Str::uuid(),
-                'user_id' => $userId,
-                'connector_id' => $personalConnector->id,
-                'permission_level' => 'admin',
-            ]);
+                // Create user permission for personal connector
+                \App\Models\UserConnectorPermission::create([
+                    'id' => (string) Str::uuid(),
+                    'user_id' => $userId,
+                    'connector_id' => $personalConnector->id,
+                    'permission_level' => 'admin',
+                ]);
 
-            $createdConnectors[] = $personalConnector;
-            \Log::info('Created personal Manual Upload connector for user', [
-                'connector_id' => $personalConnector->id,
-                'user_id' => $userId
-            ]);
+                $createdConnectors[] = $personalConnector;
+                \Log::info('Created personal Manual Upload connector for user', [
+                    'connector_id' => $personalConnector->id,
+                    'user_id' => $userId
+                ]);
+            } catch (\Exception $e) {
+                // Race condition: another request created it between our check and creation
+                \Log::warning('Race condition detected when creating personal connector', [
+                    'error' => $e->getMessage(),
+                    'user_id' => $userId
+                ]);
+                // Reload the connector that was just created
+                $personalConnector = Connector::where('org_id', $orgId)
+                    ->where('type', 'manual_upload')
+                    ->where('connection_scope', 'personal')
+                    ->whereHas('userPermissions', function($query) use ($userId) {
+                        $query->where('user_id', $userId);
+                    })
+                    ->first();
+                if ($personalConnector) {
+                    $existingConnectors[] = $personalConnector;
+                }
+            }
         } else {
             $existingConnectors[] = $personalConnector;
             \Log::info('Personal Manual Upload connector already exists for user', [

@@ -149,33 +149,75 @@ class ConnectorController extends Controller
                 }
             }
             
-            $connector = Connector::create([
-                'id' => (string) Str::uuid(),
-                'org_id' => $orgId,
-                'type' => $validated['type'],
-                'label' => $validated['label'] ?? ucfirst($validated['type']),
-                'connection_scope' => $connectionScope,
-                'workspace_name' => $validated['workspace_name'] ?? null,
-                'workspace_id' => $validated['workspace_id'] ?? null,
-                'is_primary' => $validated['is_primary'] ?? false,
-                'workspace_metadata' => $validated['workspace_metadata'] ?? null,
-                'status' => 'disconnected',
-            ]);
+            // Try to create connector with race condition handling
+            try {
+                $connector = Connector::create([
+                    'id' => (string) Str::uuid(),
+                    'org_id' => $orgId,
+                    'type' => $validated['type'],
+                    'label' => $validated['label'] ?? ucfirst($validated['type']),
+                    'connection_scope' => $connectionScope,
+                    'workspace_name' => $validated['workspace_name'] ?? null,
+                    'workspace_id' => $validated['workspace_id'] ?? null,
+                    'is_primary' => $validated['is_primary'] ?? false,
+                    'workspace_metadata' => $validated['workspace_metadata'] ?? null,
+                    'status' => 'disconnected',
+                ]);
+            } catch (\Exception $e) {
+                // Race condition: another request created it between our check and creation
+                \Log::warning('Race condition detected when creating connector', [
+                    'error' => $e->getMessage(),
+                    'type' => $validated['type'],
+                    'connection_scope' => $connectionScope,
+                    'user_id' => $userId
+                ]);
+                
+                // Reload the connector that was just created
+                $connector = Connector::where('org_id', $orgId)
+                    ->where('type', $validated['type'])
+                    ->where('connection_scope', $connectionScope)
+                    ->first();
+                
+                if (!$connector) {
+                    throw $e; // If we can't find it, rethrow the error
+                }
+                
+                // Return the existing connector
+                \Log::info('Returning existing connector after race condition', [
+                    'connector_id' => $connector->id,
+                    'type' => $validated['type']
+                ]);
+                
+                return response()->json([
+                    'success' => true,
+                    'connector' => $connector,
+                    'message' => 'Connector already exists'
+                ]);
+            }
 
             // For personal connectors, create user permission
             if ($connector->connection_scope === 'personal') {
-                \App\Models\UserConnectorPermission::create([
-                    'id' => (string) Str::uuid(),
-                    'user_id' => $userId,
-                    'connector_id' => $connector->id,
-                    'permission_level' => 'admin', // Creator gets admin access
-                ]);
-                
-                \Log::info('Created user permission for personal connector', [
-                    'connector_id' => $connector->id,
-                    'user_id' => $userId,
-                    'permission_level' => 'admin'
-                ]);
+                try {
+                    \App\Models\UserConnectorPermission::create([
+                        'id' => (string) Str::uuid(),
+                        'user_id' => $userId,
+                        'connector_id' => $connector->id,
+                        'permission_level' => 'admin', // Creator gets admin access
+                    ]);
+                    
+                    \Log::info('Created user permission for personal connector', [
+                        'connector_id' => $connector->id,
+                        'user_id' => $userId,
+                        'permission_level' => 'admin'
+                    ]);
+                } catch (\Exception $e) {
+                    // Permission may already exist due to race condition
+                    \Log::warning('Failed to create user permission (may already exist)', [
+                        'connector_id' => $connector->id,
+                        'user_id' => $userId,
+                        'error' => $e->getMessage()
+                    ]);
+                }
             }
 
             $authUrl = url("/connectors/oauth/{$connector->id}");
