@@ -23,6 +23,7 @@ use App\Http\Controllers\TeamController;
 use App\Http\Controllers\StripeWebhookController;
 use App\Http\Controllers\FeedbackController;
 use App\Http\Controllers\FeedbackDashboardController;
+use App\Http\Controllers\VisitController;
 use App\Http\Controllers\PasswordResetController;
 use App\Http\Controllers\HealthController;
 
@@ -225,6 +226,10 @@ Route::middleware('auth:sanctum')->group(function () {
 
         // Admin: Job failure alerts
         Route::get('admin/job-failures', [HealthController::class, 'alertJobFailures']);
+
+    // Admin: Visits (super admin only)
+    Route::get('admin/visits', [VisitController::class, 'index']);
+    Route::get('admin/visits/stats', [VisitController::class, 'stats']);
 
         // DEBUG: Check running jobs
         Route::get('debug/running-jobs', function () {
