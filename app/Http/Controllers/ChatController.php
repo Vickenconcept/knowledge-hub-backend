@@ -55,7 +55,8 @@ class ChatController extends Controller
             'connector_ids.*' => 'string|uuid',
             'search_scope' => 'nullable|string|in:organization,personal,both', // Workspace scope
             'workspace_ids' => 'nullable|array', // Specific workspace filtering
-            'workspace_ids.*' => 'string'
+            'workspace_ids.*' => 'string',
+            'max_sources' => 'nullable|integer|min:1|max:10', // Max visible sources override
         ]);
 
         $queryText = $validated['query'];
@@ -64,6 +65,7 @@ class ChatController extends Controller
         $requestedConnectorIds = $validated['connector_ids'] ?? null;
         $searchScope = $validated['search_scope'] ?? 'both';
         $workspaceIds = $validated['workspace_ids'] ?? null;
+        $maxSourcesOverride = isset($validated['max_sources']) ? (int) $validated['max_sources'] : null;
         
         // Detect natural language source mentions (e.g., "from dropbox", "in slack")
         $detectedSource = $this->detectSourceInQuery($queryText, $orgId);
@@ -632,8 +634,8 @@ class ChatController extends Controller
                 return ($b['score'] ?? 0) <=> ($a['score'] ?? 0);
             });
 
-            // Smart source filtering based on query complexity and relevance
-            $filteredSources = $this->filterSourcesIntelligently($formattedSources, $queryText);
+            // Smart source filtering based on query complexity and relevance (with optional override)
+            $filteredSources = $this->filterSourcesIntelligently($formattedSources, $queryText, $maxSourcesOverride);
 
             // Log the query for analytics
             \App\Models\QueryLog::create([
@@ -681,8 +683,10 @@ class ChatController extends Controller
         return response()->json([
             'answer' => $answerText,
             'sources' => $filteredSources,
-            'query' => $queryText,
+            'all_sources' => $formattedSources,
             'result_count' => count($filteredSources),
+            'all_sources_count' => count($formattedSources),
+            'query' => $queryText,
             'conversation_id' => $conversation->id,
             'workspace_stats' => $workspaceStats, // Workspace breakdown
             'search_scope' => $searchScope, // Applied search scope
@@ -1069,8 +1073,13 @@ class ChatController extends Controller
         // Connector filtering is now handled above - respect user's selection
 
         if (!empty($accessibleConnectors)) {
-            // Include both accessible connectors AND system documents (connector_id = null)
-            $filter['connector_id'] = ['$in' => array_merge($accessibleConnectors, [null])];
+            if (!empty($connectorIds)) {
+                // When user explicitly selects connectors, EXCLUDE system docs
+                $filter['connector_id'] = ['$in' => $accessibleConnectors];
+            } else {
+                // Include both accessible connectors AND system documents (connector_id = null)
+                $filter['connector_id'] = ['$in' => array_merge($accessibleConnectors, [null])];
+            }
         } else {
             // Even if no connectors, include system documents for getting started guide
             $filter['connector_id'] = ['$in' => [null]];
@@ -1257,7 +1266,7 @@ class ChatController extends Controller
     /**
      * Intelligently filter sources based on query complexity and relevance
      */
-    private function filterSourcesIntelligently(array $sources, string $query): array
+    private function filterSourcesIntelligently(array $sources, string $query, ?int $maxSourcesOverride = null): array
     {
         $query = strtolower(trim($query));
         $queryLength = strlen($query);
@@ -1287,6 +1296,11 @@ class ChatController extends Controller
             // Complex queries can have more sources
             $relevanceThreshold = 0.2; // Reduced from 0.3
             $maxSources = 5;
+        }
+        
+        // Apply explicit override if provided
+        if ($maxSourcesOverride !== null) {
+            $maxSources = max(1, min(10, (int) $maxSourcesOverride));
         }
         
         // Filter by relevance threshold
