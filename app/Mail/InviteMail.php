@@ -3,26 +3,28 @@
 namespace App\Mail;
 
 use Illuminate\Bus\Queueable;
-use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Mail\Mailable;
 use Illuminate\Mail\Mailables\Content;
 use Illuminate\Mail\Mailables\Envelope;
 use Illuminate\Queue\SerializesModels;
+use App\Models\User;
 
 class InviteMail extends Mailable
 {
     use Queueable, SerializesModels;
 
 
-    public $link;
-    public $name;
+    public User $invitedUser;
+    public string $tempPassword;
+    public string $organizationName;
     /**
      * Create a new message instance.
      */
-    public function __construct($link, $name = '')
+    public function __construct(User $invitedUser, string $tempPassword, string $organizationName = 'KHub')
     {
-        $this->link = $link;
-        $this->name = $name;
+        $this->invitedUser = $invitedUser;
+        $this->tempPassword = $tempPassword;
+        $this->organizationName = $organizationName;
     }
 
     /**
@@ -31,7 +33,7 @@ class InviteMail extends Mailable
     public function envelope(): Envelope
     {
         return new Envelope(
-            subject: 'Action Required: Please Complete the Next Step',
+            subject: 'You\'ve been invited to ' . $this->organizationName,
         );
     }
 
@@ -42,7 +44,13 @@ class InviteMail extends Mailable
     {
         return new Content(
             view: 'emails.invite_email',
-            with: ['link' => $this->link, 'name'=> $this->name],
+            with: [
+                'userName' => $this->invitedUser->name,
+                'userEmail' => $this->invitedUser->email,
+                'tempPassword' => $this->tempPassword,
+                'organizationName' => $this->organizationName,
+                'loginUrl' => config('app.frontend_url') ? rtrim(config('app.frontend_url'), '/') . '/login' : url('/')
+            ],
         );
     }
 
