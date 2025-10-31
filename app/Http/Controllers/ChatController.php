@@ -669,6 +669,15 @@ class ChatController extends Controller
                     'selected_count' => count($filteredSources),
                     'available_count' => count($formattedSources)
                 ]);
+                
+                // Apply max_sources limit if specified (respect user's request even with LLM selection)
+                if ($maxSourcesOverride !== null && count($filteredSources) > $maxSourcesOverride) {
+                    Log::info('✂️ Truncating LLM sources to respect max_sources limit', [
+                        'llm_selected' => count($filteredSources),
+                        'max_sources' => $maxSourcesOverride
+                    ]);
+                    $filteredSources = array_slice($filteredSources, 0, $maxSourcesOverride);
+                }
             } else {
                 // Fallback: Smart source filtering based on query complexity and relevance
                 Log::info('⚠️ No LLM sources provided, using similarity-based filtering', [
