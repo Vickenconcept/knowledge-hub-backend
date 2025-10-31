@@ -248,6 +248,18 @@ class IngestConnectorJob implements ShouldQueue
                 break;
             }
 
+            // Check if document already has chunks - skip if already processed
+            $existingChunkCount = \App\Models\Chunk::where('document_id', $document->id)->count();
+            if ($existingChunkCount > 0) {
+                Log::info("⏭️ Document already processed, skipping: " . $document->title, [
+                    'document_id' => $document->id,
+                    'existing_chunks' => $existingChunkCount
+                ]);
+                $skippedFiles++;
+                $processedFiles++;
+                continue;
+            }
+
             // Check for duplicate document by content hash
             $metadata = $document->metadata ?? [];
             $tmpPath = $metadata['tmp_path'] ?? null;

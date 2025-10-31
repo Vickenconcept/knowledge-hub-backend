@@ -50,15 +50,22 @@ class RAGService
         $buf .= "AVAILABLE CONTEXT (Review ALL snippets before answering):\n\n";
         $count = 0;
         $documentTypes = [];
+        
+        // Detect if query is an exact URL or domain (needs full context for proper matching)
+        $isExactQuery = $this->isExactMatchQuery($query);
+        $excerptLength = $isExactQuery ? 2000 : 1200; // Full context for exact queries, larger excerpt for others
+        
         foreach ($snippets as $s) {
             if ($count >= $maxSnip) break;
             $count++;
-            $title = $s['document_id'] ?? 'unknown_doc';
+            $docId = $s['document_id'] ?? 'unknown_id';
+            $title = $s['document_title'] ?? $s['document_id'] ?? 'unknown_doc';
             $docType = $s['doc_type'] ?? 'general';
             $documentTypes[] = $docType;
-            // Reduced excerpt size from 1200 to 800 chars for faster processing
-            $excerpt = mb_substr($s['text'] ?? '', 0, 800);
-            $buf .= "[{$count}] Document: {$title} (Type: {$docType})\n";
+            
+            // Use larger excerpt to avoid missing important information
+            $excerpt = mb_substr($s['text'] ?? '', 0, $excerptLength);
+            $buf .= "[{$count}] Document: {$title} (Type: {$docType}, ID: {$docId})\n";
             $buf .= "Content: \"{$excerpt}\"\n";
             $buf .= "Location: chars " . ($s['char_start'] ?? 0) . "-" . ($s['char_end'] ?? 0) . "\n\n";
         }
@@ -106,6 +113,18 @@ class RAGService
         $buf .= $contextGuidance . "\n";
         $buf .= $confidenceSummary . "\n";
         $buf .= "CRITICAL INSTRUCTIONS:\n\n";
+        
+        // Add special instructions for exact match queries (URLs, domains, exact terms)
+        if ($isExactQuery) {
+            $buf .= "⚠️ EXACT MATCH QUERY DETECTED:\n";
+            $buf .= "   - The user's query appears to be a URL, domain name, or very specific term: \"{$query}\"\n";
+            $buf .= "   - You MUST scan the ENTIRE CONTENT of EVERY snippet looking for this EXACT term or URL\n";
+            $buf .= "   - The snippet excerpts are FULL TEXT (not truncated), so search through ALL characters carefully\n";
+            $buf .= "   - Even if the term appears near the END of a snippet, you must detect and cite it\n";
+            $buf .= "   - If you find the exact term, mention what document it's in and what context surrounds it\n";
+            $buf .= "   - If the exact term appears NOWHERE in ANY snippet, then honestly say it's not found\n\n";
+        }
+        
         $buf .= "1. INTELLIGENT NAME MATCHING:\n";
         $buf .= "   - If the user asks about a specific person (e.g., 'tell me about John Smith'), check if that exact name appears in the documents\n";
         $buf .= "   - If the requested name is NOT found in any document, DO NOT hallucinate or make up information\n";
@@ -129,8 +148,10 @@ class RAGService
         $buf .= "   - Match the detail level and structure to the chosen style\n";
         $buf .= "   - NEVER use markdown syntax (**, ##, ___, etc.) in bullet_brief style\n\n";
         $buf .= "5. OUTPUT FORMAT:\n";
-        $buf .= "   - Return STRICT JSON: {\"answer\": \"your response here\", \"sources\": [{\"id\":1, \"document_id\":\"...\", \"char_start\":0, \"char_end\":100}, ...]}\n";
-        $buf .= "   - In the sources array, list ALL snippet IDs you actually referenced (not just the first one)\n\n";
+        $buf .= "   - Return STRICT JSON: {\"answer\": \"your response here\", \"sources\": [\"document_id_1\", \"document_id_2\", ...]}\n";
+        $buf .= "   - In the sources array, list ONLY the document IDs you actually used for your answer\n";
+        $buf .= "   - Be selective: only cite documents that provided essential information for the answer\n";
+        $buf .= "   - Do NOT include documents that were merely similar but not actually used\n\n";
         $buf .= "Remember: Respect the chosen response style while providing accurate, well-researched answers!\n";
         return $buf;
     }
@@ -207,8 +228,10 @@ class RAGService
         $hasTechnical = in_array('technical_doc', $documentTypes);
         
         if ($hasResumes) {
-            $guidance .= "• Resumes/CVs detected → Focus on: skills, experience, education, projects, accomplishments\n";
-            $guidance .= "  When asked about skills or experience, enumerate ALL items found across all resumes\n";
+            $guidance .= "• Resumes/CVs detected → Focus on: skills, experience, education, projects, accomplishments, URLs, links\n";
+            $guidance .= "  When asked about skills, experience, or projects, enumerate ALL items found across all resumes\n";
+            $guidance .= "  When asked about specific URLs or project links, search through the ENTIRE content for exact matches\n";
+            $guidance .= "  Resume project sections often contain URLs at the END of sections, so scan thoroughly\n";
         }
         
         if ($hasContracts) {
@@ -243,6 +266,35 @@ class RAGService
         }
         
         return $guidance;
+    }
+    
+    /**
+     * Detect if the query is an exact match query (URL, domain, or very specific term)
+     * These queries need full context to properly match against documents
+     */
+    private function isExactMatchQuery(string $query): bool
+    {
+        // Trim whitespace
+        $query = trim($query);
+        
+        // Check if it's a URL (starts with http:// or https://)
+        if (preg_match('/^https?:\/\//i', $query)) {
+            return true;
+        }
+        
+        // Check if it's a domain (contains .com, .org, .net, etc. without http)
+        if (preg_match('/\.(com|org|net|io|co|ai|dev|app|xyz|tv|info|biz|me|us|uk|ca|au|de|fr|jp|cn|in|ru|br|mx|it|es|nl|se|no|dk|fi|pl|za|ae|sa|kr|sg|hk|tw|nz|ie|pt|gr|cz|hu|ro|tr|il|th|my|ph|vn|id|pk|bd|eg|ma|ng|gh|ke|tz|ug|et|zw|ao|sn|ci|cm|mg|rw|bi|dj|km|mz|sz|zm|bw|ls|na|so|ss|sd|er|ly|tn|dz|mr|eh)/i', $query)) {
+            return true;
+        }
+        
+        // Check if it's a very short query (likely an exact term like "Gmail", "Slack", etc.)
+        // Exclude common question words
+        $words = explode(' ', $query);
+        if (count($words) <= 2 && !in_array(strtolower($words[0] ?? ''), ['what', 'who', 'where', 'when', 'why', 'how', 'tell', 'list', 'show'])) {
+            return true;
+        }
+        
+        return false;
     }
 }
 
