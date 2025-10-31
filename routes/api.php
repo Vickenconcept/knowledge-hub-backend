@@ -23,8 +23,11 @@ use App\Http\Controllers\TeamController;
 use App\Http\Controllers\StripeWebhookController;
 use App\Http\Controllers\FeedbackController;
 use App\Http\Controllers\FeedbackDashboardController;
+use App\Http\Controllers\VisitController;
 use App\Http\Controllers\PasswordResetController;
 use App\Http\Controllers\HealthController;
+use App\Http\Controllers\AdminOrganizationController;
+use App\Http\Controllers\ProfileController;
 
 // Track only key entry points (traffic): register, login, validate, and an explicit track endpoint
 Route::post('auth/register', [AuthController::class, 'register'])->middleware(TrackVisit::class);
@@ -103,6 +106,12 @@ Route::middleware('auth:sanctum')->group(function () {
         // Enhanced authentication endpoints
         Route::post('auth/refresh', [AuthController::class, 'refreshToken']);
 
+        // User Profile Management
+        Route::get('profile', [ProfileController::class, 'show']);
+        Route::put('profile', [ProfileController::class, 'update']);
+        Route::post('profile/password', [ProfileController::class, 'updatePassword']);
+        Route::put('profile/organization', [ProfileController::class, 'updateOrganization']);
+
         // Chat / Search (rate limited)
         Route::post('chat', [ChatController::class, 'ask'])->middleware('throttle:30,1'); // 30 requests per minute
         Route::post('search', [ChatController::class, 'search'])->middleware('throttle:60,1'); // 60 requests per minute
@@ -169,6 +178,15 @@ Route::middleware('auth:sanctum')->group(function () {
         // Admin
         Route::get('admin/stats', [AdminController::class, 'stats']);
 
+        // Admin: Organization Management
+        Route::get('admin/organizations', [AdminOrganizationController::class, 'index']);
+        Route::get('admin/organizations/{id}', [AdminOrganizationController::class, 'show']);
+        Route::put('admin/organizations/{id}', [AdminOrganizationController::class, 'update']);
+        Route::post('admin/organizations/{id}/activate', [AdminOrganizationController::class, 'activate']);
+        Route::post('admin/organizations/{id}/deactivate', [AdminOrganizationController::class, 'deactivate']);
+        Route::delete('admin/organizations/{id}', [AdminOrganizationController::class, 'destroy']);
+        Route::get('admin/organizations/{id}/users', [AdminOrganizationController::class, 'users']);
+
         // Ingest jobs
         Route::get('ingest-jobs/{id}', [IngestJobController::class, 'show']);
 
@@ -225,6 +243,10 @@ Route::middleware('auth:sanctum')->group(function () {
 
         // Admin: Job failure alerts
         Route::get('admin/job-failures', [HealthController::class, 'alertJobFailures']);
+
+    // Admin: Visits (super admin only)
+    Route::get('admin/visits', [VisitController::class, 'index']);
+    Route::get('admin/visits/stats', [VisitController::class, 'stats']);
 
         // DEBUG: Check running jobs
         Route::get('debug/running-jobs', function () {

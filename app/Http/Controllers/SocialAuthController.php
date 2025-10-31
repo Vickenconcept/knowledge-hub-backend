@@ -97,23 +97,26 @@ class SocialAuthController extends Controller
      */
     private function createUserFromGoogle($googleUser): User
     {
-        // Create organization for the user
-        $organization = Organization::create([
-            'id' => (string) Str::uuid(),
-            'name' => $googleUser->name . "'s Organization",
-        ]);
-
-        // Create user
+        // Create user first so we can set them as owner
         $user = User::create([
-            'id' => (string) Str::uuid(),
             'name' => $googleUser->name,
             'email' => $googleUser->email,
             'password' => Hash::make(Str::random(32)), // Random password (won't be used)
             'google_id' => $googleUser->id,
-            'org_id' => $organization->id,
             'role' => 'admin', // First user in org is admin
             'email_verified_at' => now(), // Auto-verify email from Google
         ]);
+
+        // Create organization with user as owner
+        $organization = Organization::create([
+            'id' => (string) Str::uuid(),
+            'name' => $googleUser->name . "'s Organization",
+            'owner_id' => $user->id,
+        ]);
+
+        // Now update user with org_id (we can't do it before organization exists)
+        $user->org_id = $organization->id;
+        $user->save();
 
         return $user;
     }

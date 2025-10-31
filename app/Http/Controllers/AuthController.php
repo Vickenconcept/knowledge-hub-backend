@@ -27,20 +27,24 @@ class AuthController extends Controller
             ], 422);
         }
 
-        $organization = Organization::create([
-            'id' => (string) Str::uuid(),
-            'name' => "Organization",
-        ]);
-
-        // Create user
+        // Create user first so we can set them as owner
         $user = User::create([
-            'id' => (string) Str::uuid(),
             'name' => $request->name,
             'email' => $request->email,
             'role' => 'admin',
-            'org_id' => $organization->id,
             'password' => Hash::make($request->password),
         ]);
+
+        // Create organization with user as owner
+        $organization = Organization::create([
+            'id' => (string) Str::uuid(),
+            'name' => "Organization",
+            'owner_id' => $user->id,
+        ]);
+
+        // Now update user with org_id (we can't do it before organization exists)
+        $user->org_id = $organization->id;
+        $user->save();
 
         $token = $user->createToken('api-token')->plainTextToken;
 

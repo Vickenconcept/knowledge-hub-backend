@@ -87,6 +87,11 @@ class SubscriptionService
             ]);
         }
         
+        // Update organization.plan field to keep it in sync
+        DB::table('organizations')
+            ->where('id', $orgId)
+            ->update(['plan' => $tierName]);
+        
         return [
             'success' => true,
             'tier' => $tierName,
