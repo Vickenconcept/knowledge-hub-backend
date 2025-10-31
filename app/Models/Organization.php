@@ -28,6 +28,11 @@ class Organization extends Model
                 $model->id = (string) Str::uuid();
             }
         });
+
+        static::created(function ($model) {
+            // Auto-assign new organization to Free tier
+            \App\Services\SubscriptionService::assignFreeTier($model->id);
+        });
     }
 
     public function users()
