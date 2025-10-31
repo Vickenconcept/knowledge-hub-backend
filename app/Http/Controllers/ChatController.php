@@ -221,17 +221,17 @@ class ChatController extends Controller
             if ($routing['search_documents']) {
             $embedding = $embeddingService->embed($queryText, $orgId);
                 
-                // Build workspace-aware Pinecone metadata filter
-                $pineconeFilter = $this->buildWorkspaceAwareFilter($orgId, $user->id, $connectorIds, $searchScope, $workspaceIds);
+                // Build workspace-aware vector metadata filter
+                $vectorFilter = $this->buildWorkspaceAwareFilter($orgId, $user->id, $connectorIds, $searchScope, $workspaceIds);
                 
-                $matches = $vectorStore->query($embedding, $topK, $orgId, $orgId, $conversation->id, $pineconeFilter);
+                $matches = $vectorStore->query($embedding, $topK, $orgId, $orgId, $conversation->id, $vectorFilter);
             $chunkIds = array_map(fn($m) => $m['id'], $matches);
             
             Log::info('🔍 Vector search results', [
                 'user_id' => $user->id,
                 'org_id' => $orgId,
                 'search_scope' => $searchScope,
-                'pinecone_filter' => $pineconeFilter,
+                'vector_filter' => $vectorFilter,
                 'matches_count' => count($matches),
                 'chunk_ids' => $chunkIds
             ]);
@@ -1013,7 +1013,7 @@ class ChatController extends Controller
     }
 
     /**
-     * Build workspace-aware Pinecone metadata filter
+     * Build workspace-aware vector metadata filter
      */
     private function buildWorkspaceAwareFilter($orgId, $userId, $connectorIds, $searchScope, $workspaceIds)
     {

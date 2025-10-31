@@ -155,7 +155,7 @@ class ProcessLargeFileJob implements ShouldQueue
                 $createdChunks[] = $chunk;
             }
 
-            // Generate embeddings and upload to Pinecone
+            // Generate embeddings and store in local database
             if (!empty($createdChunks)) {
                 Log::info('Generating embeddings for large file chunks', [
                     'chunk_count' => count($createdChunks)
@@ -236,7 +236,7 @@ class ProcessLargeFileJob implements ShouldQueue
     }
 
     /**
-     * Generate embeddings for chunks and upload to Pinecone
+     * Generate embeddings for chunks and store in local database
      */
     private function generateAndUploadEmbeddings(array $chunks, $job): void
     {
@@ -274,7 +274,7 @@ class ProcessLargeFileJob implements ShouldQueue
                 // Generate embeddings in batch
                 $embeddings = $embeddingService->embedBatch($texts);
 
-                // Prepare vectors for Pinecone
+                // Prepare vectors for storage
                 $vectors = [];
                 foreach ($batch as $idx => $chunk) {
                     $vectors[] = [
@@ -291,10 +291,10 @@ class ProcessLargeFileJob implements ShouldQueue
                     ];
                 }
 
-                // Upsert to Pinecone with org_id as namespace
+                // Store vectors in local database
                 $vectorStore->upsert($vectors, $this->orgId);
 
-                Log::info("✅ Batch uploaded to Pinecone (large file)", [
+                Log::info("✅ Batch uploaded to database (large file)", [
                     'batch' => $batchIndex + 1,
                     'vectors_count' => count($vectors)
                 ]);

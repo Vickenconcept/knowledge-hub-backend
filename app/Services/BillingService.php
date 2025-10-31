@@ -48,8 +48,8 @@ class BillingService
         $costsByOperation = [
             'openai_chat' => $costs->where('operation_type', 'chat')->sum('cost_usd'),
             'openai_embeddings' => $costs->where('operation_type', 'embedding')->sum('cost_usd'),
-            'pinecone_queries' => $costs->where('operation_type', 'vector_query')->sum('cost_usd'),
-            'pinecone_storage' => $costs->where('operation_type', 'vector_upsert')->sum('cost_usd'),
+            'vector_queries' => $costs->where('operation_type', 'vector_query')->sum('cost_usd'),
+            'vector_storage' => $costs->where('operation_type', 'vector_upsert')->sum('cost_usd'),
             'connector_usage' => 0, // File pulls are free but we track them
         ];
         

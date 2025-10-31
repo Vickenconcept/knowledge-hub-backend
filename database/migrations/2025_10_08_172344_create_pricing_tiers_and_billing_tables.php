@@ -73,7 +73,7 @@ return new class extends Migration
             $table->date('period_end');
             
             // Costs breakdown
-            $table->decimal('infrastructure_cost', 10, 2)->default(0); // What you paid (OpenAI, Pinecone)
+            $table->decimal('infrastructure_cost', 10, 2)->default(0); // What you paid (OpenAI)
             $table->decimal('markup_amount', 10, 2)->default(0); // Your profit margin
             $table->decimal('base_subscription_fee', 10, 2)->default(0); // Monthly tier fee
             $table->decimal('total_amount', 10, 2)->default(0); // What customer pays
@@ -112,7 +112,7 @@ return new class extends Migration
             // Costs (what you pay)
             $table->decimal('total_costs', 10, 2)->default(0);
             $table->decimal('openai_costs', 10, 2)->default(0);
-            $table->decimal('pinecone_costs', 10, 2)->default(0);
+            $table->decimal('vector_database_costs', 10, 2)->default(0);
             $table->decimal('other_infrastructure_costs', 10, 2)->default(0);
             
             // Profit

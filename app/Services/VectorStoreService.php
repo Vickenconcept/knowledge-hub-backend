@@ -6,12 +6,12 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
 /**
- * VectorStoreService - MySQL BLOB-based Vector Storage
+ * VectorStoreService - MySQL/PostgreSQL BLOB-based Vector Storage
  * 
- * Stores vector embeddings directly in MySQL database using BLOB storage.
+ * Stores vector embeddings directly in the database using BLOB/BYTEA storage.
  * Performs cosine similarity search in PHP for fast retrieval.
  * 
- * This replaces external vector databases like Pinecone with a self-hosted solution.
+ * Privacy-first: All vector data stays in your own database, never sent to third parties.
  */
 class VectorStoreService
 {
