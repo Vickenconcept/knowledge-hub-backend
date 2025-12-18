@@ -1033,6 +1033,7 @@ class IngestConnectorJob implements ShouldQueue
 
                     // Upload file to Cloudinary
                     $cloudinaryUrl = null;
+                    $cloudinaryPublicId = null;
                     try {
                         // Save content to temp file for upload
                         $tmpDir = storage_path('app/tmp_uploads');
@@ -1059,6 +1060,7 @@ class IngestConnectorJob implements ShouldQueue
                         
                         $upload = $uploader->uploadRawPath($tmpPath, 'knowledgehub/google-drive');
                         $cloudinaryUrl = $upload['secure_url'] ?? null;
+                        $cloudinaryPublicId = $upload['public_id'] ?? null;
                         
                         // Clean up temp file
                         @unlink($tmpPath);
@@ -1115,11 +1117,19 @@ class IngestConnectorJob implements ShouldQueue
                         \App\Models\Chunk::where('document_id', $existingDocument->id)->delete();
 
                         // Update document
+                        $updatedMetadata = is_array($existingDocument->metadata) ? $existingDocument->metadata : [];
+                        $classifiedMetadata = is_array($classification['metadata'] ?? null) ? ($classification['metadata'] ?? []) : [];
+                        $updatedMetadata = array_merge($updatedMetadata, $classifiedMetadata);
+                        if (!empty($cloudinaryPublicId)) {
+                            $updatedMetadata['cloudinary_public_id'] = $cloudinaryPublicId;
+                            $updatedMetadata['cloudinary_resource_type'] = 'raw';
+                        }
+
                         $existingDocument->update([
                             'title' => $file->getName(),
                             'mime_type' => $file->getMimeType(),
                             'doc_type' => $classification['doc_type'],
-                            'metadata' => $classification['metadata'],
+                            'metadata' => $updatedMetadata,
                             'tags' => $classification['tags'],
                             'sha256' => $contentHash,
                             'size' => strlen($content),
@@ -1147,7 +1157,13 @@ class IngestConnectorJob implements ShouldQueue
                             'source_url' => $file->getWebViewLink(),
                             'mime_type' => $file->getMimeType(),
                             'doc_type' => $classification['doc_type'],
-                            'metadata' => $classification['metadata'],
+                            'metadata' => array_merge(
+                                is_array($classification['metadata'] ?? null) ? ($classification['metadata'] ?? []) : [],
+                                array_filter([
+                                    'cloudinary_public_id' => $cloudinaryPublicId,
+                                    'cloudinary_resource_type' => 'raw',
+                                ])
+                            ),
                             'tags' => $classification['tags'],
                             'sha256' => $contentHash,
                             'size' => strlen($content),
@@ -1549,6 +1565,7 @@ class IngestConnectorJob implements ShouldQueue
 
                     // Upload file to Cloudinary
                     $cloudinaryUrl = null;
+                    $cloudinaryPublicId = null;
                     try {
                         // Save content to temp file for upload
                         $tmpDir = storage_path('app/tmp_uploads');
@@ -1559,6 +1576,7 @@ class IngestConnectorJob implements ShouldQueue
                         
                         $upload = $uploader->uploadRawPath($tmpPath, 'knowledgehub/dropbox');
                         $cloudinaryUrl = $upload['secure_url'] ?? null;
+                        $cloudinaryPublicId = $upload['public_id'] ?? null;
                         
                         // Clean up temp file
                         @unlink($tmpPath);
@@ -1615,11 +1633,19 @@ class IngestConnectorJob implements ShouldQueue
                         \App\Models\Chunk::where('document_id', $existingDocument->id)->delete();
 
                         // Update document
+                        $updatedMetadata = is_array($existingDocument->metadata) ? $existingDocument->metadata : [];
+                        $classifiedMetadata = is_array($classification['metadata'] ?? null) ? ($classification['metadata'] ?? []) : [];
+                        $updatedMetadata = array_merge($updatedMetadata, $classifiedMetadata);
+                        if (!empty($cloudinaryPublicId)) {
+                            $updatedMetadata['cloudinary_public_id'] = $cloudinaryPublicId;
+                            $updatedMetadata['cloudinary_resource_type'] = 'raw';
+                        }
+
                         $existingDocument->update([
                             'title' => $file['name'],
                             'mime_type' => $file['mime_type'],
                             'doc_type' => $classification['doc_type'],
-                            'metadata' => $classification['metadata'],
+                            'metadata' => $updatedMetadata,
                             'tags' => $classification['tags'],
                             'sha256' => $contentHash,
                             'size' => strlen($content),
@@ -1647,7 +1673,13 @@ class IngestConnectorJob implements ShouldQueue
                             'source_url' => $dropboxSourceUrl,
                             'mime_type' => $file['mime_type'],
                             'doc_type' => $classification['doc_type'],
-                            'metadata' => $classification['metadata'],
+                            'metadata' => array_merge(
+                                is_array($classification['metadata'] ?? null) ? ($classification['metadata'] ?? []) : [],
+                                array_filter([
+                                    'cloudinary_public_id' => $cloudinaryPublicId,
+                                    'cloudinary_resource_type' => 'raw',
+                                ])
+                            ),
                             'tags' => $classification['tags'],
                             'sha256' => $contentHash,
                             'size' => strlen($content),
@@ -2302,6 +2334,7 @@ class IngestConnectorJob implements ShouldQueue
         // SAME AS GOOGLE DRIVE: Upload to Cloudinary
         // ========================================
         $cloudinaryUrl = null;
+        $cloudinaryPublicId = null;
         try {
             $uploader = new \App\Services\FileUploadService();
             // Create temp file with conversation transcript
@@ -2310,6 +2343,7 @@ class IngestConnectorJob implements ShouldQueue
             
             $upload = $uploader->uploadRawPath($tmpPath, 'knowledgehub/slack');
             $cloudinaryUrl = $upload['secure_url'] ?? null;
+            $cloudinaryPublicId = $upload['public_id'] ?? null;
             
             @unlink($tmpPath); // Clean up
             
@@ -2418,6 +2452,7 @@ class IngestConnectorJob implements ShouldQueue
                 
                 $upload = $uploader->uploadRawPath($tmpPath, 'knowledgehub/slack');
                 $cloudinaryUrl = $upload['secure_url'] ?? $cloudinaryUrl;
+                $cloudinaryPublicId = $upload['public_id'] ?? $cloudinaryPublicId;
                 
                 @unlink($tmpPath);
                 
@@ -2467,6 +2502,8 @@ class IngestConnectorJob implements ShouldQueue
                     'thread_ts' => $isThread ? $conversation['thread_ts'] : null,
                     'download_url' => $cloudinaryUrl,
                     'transcript_url' => $cloudinaryUrl,
+                    'cloudinary_public_id' => $cloudinaryPublicId,
+                    'cloudinary_resource_type' => 'raw',
                     'is_conversation' => true,
                     'source_platform' => 'slack',
                 ]),
@@ -2528,6 +2565,8 @@ class IngestConnectorJob implements ShouldQueue
                     'thread_ts' => $isThread ? $conversation['thread_ts'] : null,
                     'download_url' => $cloudinaryUrl,
                     'transcript_url' => $cloudinaryUrl,
+                    'cloudinary_public_id' => $cloudinaryPublicId,
+                    'cloudinary_resource_type' => 'raw',
                     'is_conversation' => true,
                     'source_platform' => 'slack',
                 ]),
@@ -2866,6 +2905,7 @@ class IngestConnectorJob implements ShouldQueue
                 
                 $upload = $uploader->uploadRawPath($tmpPath, 'knowledgehub/slack/files');
                 $fileCloudinaryUrl = $upload['secure_url'] ?? null;
+                $fileCloudinaryPublicId = $upload['public_id'] ?? null;
                 
                 Log::info("Slack file uploaded to Cloudinary", [
                     'file' => $fileName,
@@ -2920,6 +2960,8 @@ class IngestConnectorJob implements ShouldQueue
                             'conversation_document_id' => $conversationDocId,
                             'download_url' => $fileCloudinaryUrl,
                             'file_preview_url' => $fileCloudinaryUrl,
+                            'cloudinary_public_id' => $fileCloudinaryPublicId,
+                            'cloudinary_resource_type' => 'raw',
                             'original_slack_url' => $fileUrl,
                             'file_extension' => pathinfo($fileName, PATHINFO_EXTENSION),
                             'is_downloadable' => true,
@@ -2957,6 +2999,8 @@ class IngestConnectorJob implements ShouldQueue
                             'conversation_document_id' => $conversationDocId,
                             'download_url' => $fileCloudinaryUrl,
                             'file_preview_url' => $fileCloudinaryUrl,
+                            'cloudinary_public_id' => $fileCloudinaryPublicId,
+                            'cloudinary_resource_type' => 'raw',
                             'original_slack_url' => $fileUrl,
                             'file_extension' => pathinfo($fileName, PATHINFO_EXTENSION),
                             'is_downloadable' => true,

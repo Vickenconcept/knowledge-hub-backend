@@ -501,6 +501,37 @@ class ConnectorController extends Controller
         
         // Get document IDs and chunk IDs for vector deletion
         $documentIds = $connector->documents()->pluck('id')->toArray();
+
+        // Best-effort: delete Cloudinary assets for all documents under this connector
+        try {
+            $uploader = new \App\Services\FileUploadService();
+            $docsForCloudinary = \App\Models\Document::whereIn('id', $documentIds)
+                ->get(['id', 's3_path', 'metadata']);
+
+            foreach ($docsForCloudinary as $doc) {
+                try {
+                    $publicId = $doc->metadata['cloudinary_public_id'] ?? null;
+                    $resourceType = $doc->metadata['cloudinary_resource_type'] ?? 'raw';
+
+                    if (!empty($publicId)) {
+                        $uploader->destroyByPublicId($publicId, $resourceType);
+                    } else {
+                        $uploader->destroyFromUrl($doc->s3_path, $resourceType);
+                    }
+                } catch (\Throwable $e) {
+                    \Log::warning('Cloudinary delete failed for connector document (continuing)', [
+                        'connector_id' => $connector->id,
+                        'document_id' => $doc->id,
+                        'error' => $e->getMessage(),
+                    ]);
+                }
+            }
+        } catch (\Throwable $e) {
+            \Log::warning('Cloudinary bulk delete failed during connector disconnect (continuing)', [
+                'connector_id' => $connector->id,
+                'error' => $e->getMessage(),
+            ]);
+        }
         
         // Get all chunk IDs to delete vectors
         $chunkIds = \App\Models\Chunk::whereIn('document_id', $documentIds)
