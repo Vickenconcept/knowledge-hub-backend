@@ -196,13 +196,26 @@ class DocumentController extends Controller
             $cloudinaryPublicId = $doc->metadata['cloudinary_public_id'] ?? null;
             $cloudinaryResourceType = $doc->metadata['cloudinary_resource_type'] ?? 'raw';
 
-            $cloudinaryRes = !empty($cloudinaryPublicId)
-                ? $uploader->destroyByPublicId($cloudinaryPublicId, $cloudinaryResourceType)
-                : $uploader->destroyFromUrl($doc->s3_path, $cloudinaryResourceType);
+            $resolvedPublicId = !empty($cloudinaryPublicId)
+                ? $cloudinaryPublicId
+                : $uploader->extractPublicIdFromUrl($doc->s3_path);
+
+            $cloudinaryRes = !empty($resolvedPublicId)
+                ? $uploader->destroyByPublicId($resolvedPublicId, $cloudinaryResourceType)
+                : ['skipped' => true, 'reason' => 'no_public_id'];
+
+            // Short, easy-to-spot confirmation in logs
+            Log::info('Cloudinary delete result', [
+                'document_id' => $doc->id,
+                'public_id' => $resolvedPublicId,
+                'result' => $cloudinaryRes['result'] ?? null,
+                'skipped' => $cloudinaryRes['skipped'] ?? false,
+                'reason' => $cloudinaryRes['reason'] ?? null,
+            ]);
 
             Log::info('Cloudinary delete attempted for document', [
                 'document_id' => $doc->id,
-                'public_id' => $cloudinaryPublicId,
+                'public_id' => $resolvedPublicId,
                 'cloudinary_result' => $cloudinaryRes['result'] ?? ($cloudinaryRes['skipped'] ?? false ? 'skipped' : null),
                 'cloudinary_response' => $cloudinaryRes,
             ]);
