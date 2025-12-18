@@ -132,7 +132,7 @@ class ProfileController extends Controller
 
         // Check if user has permission to update organization
         // Only admins or the owner can update organization
-        if ($user->role !== 'admin' && $organization->owner_id !== $user->id) {
+        if ($user->role !== 'admin' && $user->role !== 'super_admin' && $organization->owner_id !== $user->id) {
             return response()->json([
                 'error' => 'Unauthorized - Admin or owner access required',
             ], 403);

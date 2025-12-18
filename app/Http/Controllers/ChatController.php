@@ -221,17 +221,17 @@ class ChatController extends Controller
             if ($routing['search_documents']) {
             $embedding = $embeddingService->embed($queryText, $orgId);
                 
-                // Build workspace-aware Pinecone metadata filter
-                $pineconeFilter = $this->buildWorkspaceAwareFilter($orgId, $user->id, $connectorIds, $searchScope, $workspaceIds);
+                // Build workspace-aware vector metadata filter
+                $vectorFilter = $this->buildWorkspaceAwareFilter($orgId, $user->id, $connectorIds, $searchScope, $workspaceIds);
                 
-                $matches = $vectorStore->query($embedding, $topK, $orgId, $orgId, $conversation->id, $pineconeFilter);
+                $matches = $vectorStore->query($embedding, $topK, $orgId, $orgId, $conversation->id, $vectorFilter);
             $chunkIds = array_map(fn($m) => $m['id'], $matches);
             
             Log::info('🔍 Vector search results', [
                 'user_id' => $user->id,
                 'org_id' => $orgId,
                 'search_scope' => $searchScope,
-                'pinecone_filter' => $pineconeFilter,
+                'vector_filter' => $vectorFilter,
                 'matches_count' => count($matches),
                 'chunk_ids' => $chunkIds
             ]);
@@ -322,6 +322,7 @@ class ChatController extends Controller
                 $snippets[] = [
                     'chunk_id' => $c->id,
                     'document_id' => $c->document_id,
+                    'document_title' => $c->document->title ?? 'Unknown',
                     'text' => $c->text,
                     'char_start' => $c->char_start,
                     'char_end' => $c->char_end,
@@ -454,7 +455,9 @@ class ChatController extends Controller
                 'user_id' => $user->id,
                 'raw_answer_type' => gettype($rawAnswer),
                 'raw_answer_preview' => is_string($rawAnswer) ? mb_substr($rawAnswer, 0, 300) . '...' : 'Non-string',
-                'answer_text_preview' => is_string($answerText) ? mb_substr($answerText, 0, 300) . '...' : 'Non-string'
+                'answer_text_preview' => is_string($answerText) ? mb_substr($answerText, 0, 300) . '...' : 'Non-string',
+                'full_response_keys' => array_keys($llmResponse),
+                'full_response_structure' => json_encode($llmResponse)
             ]);
 
             // Case 1: answer is a JSON string { answer, sources }
@@ -474,6 +477,13 @@ class ChatController extends Controller
                 $answerText = (string) ($rawAnswer['answer'] ?? '');
                 $llmSources = $rawAnswer['sources'] ?? $llmSources;
             }
+            
+            Log::info('🔍 LLM SOURCES EXTRACTED', [
+                'user_id' => $user->id,
+                'llm_sources_count' => count($llmSources),
+                'llm_sources' => $llmSources,
+                'llm_sources_type' => gettype($llmSources)
+            ]);
 
             // Convert literal \n to actual newlines for better formatting
             if (is_string($answerText)) {
@@ -634,8 +644,47 @@ class ChatController extends Controller
                 return ($b['score'] ?? 0) <=> ($a['score'] ?? 0);
             });
 
-            // Smart source filtering based on query complexity and relevance (with optional override)
-            $filteredSources = $this->filterSourcesIntelligently($formattedSources, $queryText, $maxSourcesOverride);
+            // If LLM provided sources, use them (trust the AI's judgment), otherwise use filtered sources
+            if (!empty($llmSources) && is_array($llmSources)) {
+                Log::info('🎯 Using LLM-selected sources', [
+                    'user_id' => $user->id,
+                    'llm_sources_count' => count($llmSources),
+                    'llm_sources' => $llmSources,
+                    'formatted_sources_count' => count($formattedSources)
+                ]);
+                
+                // Filter formatted sources to only those the LLM selected
+                $llmSourceIds = is_array($llmSources[0] ?? null) 
+                    ? array_map(fn($s) => $s['document_id'] ?? $s, $llmSources) 
+                    : $llmSources;
+                
+                $filteredSources = array_filter($formattedSources, function($source) use ($llmSourceIds) {
+                    return in_array($source['document_id'], $llmSourceIds);
+                });
+                
+                // Re-index array after filtering
+                $filteredSources = array_values($filteredSources);
+                
+                Log::info('✅ LLM sources applied', [
+                    'selected_count' => count($filteredSources),
+                    'available_count' => count($formattedSources)
+                ]);
+                
+                // Apply max_sources limit if specified (respect user's request even with LLM selection)
+                if ($maxSourcesOverride !== null && count($filteredSources) > $maxSourcesOverride) {
+                    Log::info('✂️ Truncating LLM sources to respect max_sources limit', [
+                        'llm_selected' => count($filteredSources),
+                        'max_sources' => $maxSourcesOverride
+                    ]);
+                    $filteredSources = array_slice($filteredSources, 0, $maxSourcesOverride);
+                }
+            } else {
+                // Fallback: Smart source filtering based on query complexity and relevance
+                Log::info('⚠️ No LLM sources provided, using similarity-based filtering', [
+                    'user_id' => $user->id
+                ]);
+                $filteredSources = $this->filterSourcesIntelligently($formattedSources, $queryText, $maxSourcesOverride);
+            }
 
             // Log the query for analytics
             \App\Models\QueryLog::create([
@@ -1013,7 +1062,7 @@ class ChatController extends Controller
     }
 
     /**
-     * Build workspace-aware Pinecone metadata filter
+     * Build workspace-aware vector metadata filter
      */
     private function buildWorkspaceAwareFilter($orgId, $userId, $connectorIds, $searchScope, $workspaceIds)
     {
@@ -1276,6 +1325,9 @@ class ChatController extends Controller
         $isSimpleGreeting = in_array($query, ['hello', 'hi', 'hey', 'good morning', 'good afternoon', 'good evening']);
         $isShortQuery = $queryLength <= 10 || $queryWords <= 2;
         
+        // Detect exact match queries (URLs, domains, exact terms)
+        $isExactMatchQuery = $this->isExactMatchQuery($query);
+        
         // Calculate relevance threshold based on query complexity
         $baseThreshold = 0.2; // Lower base threshold
         $relevanceThreshold = $baseThreshold;
@@ -1284,6 +1336,10 @@ class ChatController extends Controller
             // For greetings, only show very relevant sources (high threshold)
             $relevanceThreshold = 0.5; // Reduced from 0.6
             $maxSources = 1;
+        } elseif ($isExactMatchQuery) {
+            // For exact match queries (URLs, domains), require very high relevance
+            $relevanceThreshold = 0.35; // High threshold to filter out unrelated sources
+            $maxSources = 3;
         } elseif ($isShortQuery) {
             // For short queries, be more selective
             $relevanceThreshold = 0.3; // Reduced from 0.5
@@ -1508,6 +1564,34 @@ class ChatController extends Controller
         $score += 0.1;
         
         return min(1.0, $score); // Cap at 1.0
+    }
+    
+    /**
+     * Detect if the query is an exact match query (URL, domain, or very specific term)
+     */
+    private function isExactMatchQuery(string $query): bool
+    {
+        // Trim whitespace
+        $query = trim($query);
+        
+        // Check if it contains a URL (http:// or https:// anywhere in the query)
+        if (preg_match('/https?:\/\//i', $query)) {
+            return true;
+        }
+        
+        // Check if it's a domain (contains .com, .org, .net, etc. without http)
+        if (preg_match('/\.(com|org|net|io|co|ai|dev|app|xyz|tv|info|biz|me|us|uk|ca|au|de|fr|jp|cn|in|ru|br|mx|it|es|nl|se|no|dk|fi|pl|za|ae|sa|kr|sg|hk|tw|nz|ie|pt|gr|cz|hu|ro|tr|il|th|my|ph|vn|id|pk|bd|eg|ma|ng|gh|ke|tz|ug|et|zw|ao|sn|ci|cm|mg|rw|bi|dj|km|mz|sz|zm|bw|ls|na|so|ss|sd|er|ly|tn|dz|mr|eh)/i', $query)) {
+            return true;
+        }
+        
+        // Check if it's a very short query (likely an exact term)
+        // Exclude common question words
+        $words = explode(' ', $query);
+        if (count($words) <= 2 && !in_array(strtolower($words[0] ?? ''), ['what', 'who', 'where', 'when', 'why', 'how', 'tell', 'list', 'show'])) {
+            return true;
+        }
+        
+        return false;
     }
 
     /**

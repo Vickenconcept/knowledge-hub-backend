@@ -15,14 +15,38 @@ class AdminController extends Controller
         // if (($request->user()->role ?? 'user') !== 'admin') {
         //     return response()->json(['error' => 'Forbidden'], 403);
         // }
-        return response()->json([
-            'org_count' => Organization::count(),
-            'user_count' => User::count(),
-            'document_count' => Document::where(function($query) {
+        $user = $request->user();
+        $isSuperAdmin = $user && $user->role === 'super_admin';
+        $orgId = $user?->org_id;
+
+        $orgCount = $isSuperAdmin
+            ? Organization::count()
+            : ($orgId ? Organization::where('id', $orgId)->count() : 0);
+
+        $userCount = User::when(!$isSuperAdmin && $orgId, function ($query) use ($orgId) {
+                $query->where('org_id', $orgId);
+            })
+            ->count();
+
+        $documentCount = Document::where(function ($query) {
                 $query->where('doc_type', '!=', 'guide')
                       ->orWhereNull('doc_type');
-            })->count(),
-            'chunk_count' => Chunk::count(),
+            })
+            ->when(!$isSuperAdmin && $orgId, function ($query) use ($orgId) {
+                $query->where('org_id', $orgId);
+            })
+            ->count();
+
+        $chunkCount = Chunk::when(!$isSuperAdmin && $orgId, function ($query) use ($orgId) {
+                $query->where('org_id', $orgId);
+            })
+            ->count();
+
+        return response()->json([
+            'org_count' => $orgCount,
+            'user_count' => $userCount,
+            'document_count' => $documentCount,
+            'chunk_count' => $chunkCount,
         ]);
     }
 }

@@ -193,15 +193,15 @@ class DocumentController extends Controller
         // Get all chunk IDs for vector deletion
         $chunkIds = Chunk::where('document_id', $doc->id)->pluck('id')->all();
 
-        // Delete from vector store (Pinecone)
+        // Delete from vector store (local database)
         if (!empty($chunkIds)) {
             try { 
                 $vector->delete($chunkIds); 
-                Log::info('Deleted vectors from Pinecone', [
+                Log::info('Deleted vectors from database', [
                     'chunk_count' => count($chunkIds),
                 ]);
             } catch (\Throwable $e) { 
-                Log::warning('Failed to delete vectors from Pinecone', [
+                Log::warning('Failed to delete vectors from database', [
                     'error' => $e->getMessage(),
                 ]);
             }

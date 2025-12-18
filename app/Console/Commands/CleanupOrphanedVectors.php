@@ -72,7 +72,7 @@ class CleanupOrphanedVectors extends Command
 
         if ($isDryRun) {
             $this->info('🔍 DRY RUN - No changes made');
-            $this->info("Would delete {$orphanedChunks->count()} chunks from database and Pinecone");
+            $this->info("Would delete {$orphanedChunks->count()} chunks from database");
             return 0;
         }
 
@@ -83,15 +83,15 @@ class CleanupOrphanedVectors extends Command
 
         $chunkIds = $orphanedChunks->pluck('id')->toArray();
 
-        // Delete from Pinecone first
-        $this->info('🗑️  Deleting vectors from Pinecone...');
+        // Delete vectors from database first
+        $this->info('🗑️  Deleting vectors from database...');
         $vectorStore = new VectorStoreService();
         
         try {
             $vectorStore->delete($chunkIds);
-            $this->info("✅ Deleted {$orphanedChunks->count()} vectors from Pinecone");
+            $this->info("✅ Deleted {$orphanedChunks->count()} vectors from database");
         } catch (\Exception $e) {
-            $this->error('❌ Failed to delete from Pinecone: ' . $e->getMessage());
+            $this->error('❌ Failed to delete from database: ' . $e->getMessage());
             if (!$this->confirm('Continue with database deletion anyway?')) {
                 return 1;
             }

@@ -6,12 +6,12 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
 /**
- * VectorStoreService - MySQL BLOB-based Vector Storage
+ * VectorStoreService - MySQL/PostgreSQL BLOB-based Vector Storage
  * 
- * Stores vector embeddings directly in MySQL database using BLOB storage.
+ * Stores vector embeddings directly in the database using BLOB/BYTEA storage.
  * Performs cosine similarity search in PHP for fast retrieval.
  * 
- * This replaces external vector databases like Pinecone with a self-hosted solution.
+ * Privacy-first: All vector data stays in your own database, never sent to third parties.
  */
 class VectorStoreService
 {
@@ -188,56 +188,126 @@ class VectorStoreService
                 }
             }
             
-            $chunks = $query->get();
+            // Get chunk count first for optimization decision
+            $totalChunks = $query->count();
             
             Log::info('📦 Retrieved chunks for similarity search', [
                 'org_id' => $filterOrgId,
-                'chunk_count' => count($chunks),
+                'total_chunks' => $totalChunks,
                 'filter' => $filter
             ]);
             
-            if ($chunks->isEmpty()) {
+            if ($totalChunks === 0) {
                 Log::warning('⚠️ No chunks with embeddings found', ['org_id' => $filterOrgId]);
                 return [];
             }
             
-            // Calculate cosine similarity for each chunk
+            // Performance optimization: For large datasets, process in batches to reduce memory usage
+            $batchSize = 5000; // Process 5000 chunks at a time
             $scored = [];
             $driver = DB::connection()->getDriverName();
             
-            foreach ($chunks as $chunk) {
-                // Handle different binary formats for MySQL vs PostgreSQL
-                $binaryData = $chunk->embedding;
+            if ($totalChunks > $batchSize) {
+                Log::info('⚡ Large dataset detected, processing in batches', [
+                    'total_chunks' => $totalChunks,
+                    'batch_size' => $batchSize,
+                    'estimated_batches' => ceil($totalChunks / $batchSize)
+                ]);
                 
-                if ($driver === 'pgsql' && is_resource($binaryData)) {
-                    // PostgreSQL returns BYTEA as a stream resource
-                    $binaryData = stream_get_contents($binaryData);
+                // Process in batches to prevent memory exhaustion
+                $processedCount = 0;
+                for ($offset = 0; $offset < $totalChunks; $offset += $batchSize) {
+                    $batchChunks = $query->skip($offset)->take($batchSize)->get();
+                    
+                    foreach ($batchChunks as $chunk) {
+                        // Handle different binary formats for MySQL vs PostgreSQL
+                        $binaryData = $chunk->embedding;
+                        
+                        if ($driver === 'pgsql' && is_resource($binaryData)) {
+                            // PostgreSQL returns BYTEA as a stream resource
+                            $binaryData = stream_get_contents($binaryData);
+                        }
+                        
+                        // Unpack binary to float array
+                        $chunkVector = unpack('f*', $binaryData);
+                        
+                        if (empty($chunkVector)) {
+                            Log::warning('⚠️ Failed to unpack embedding', [
+                                'chunk_id' => $chunk->id,
+                                'embedding_type' => gettype($chunk->embedding),
+                                'driver' => $driver
+                            ]);
+                            continue;
+                        }
+                        
+                        // Calculate cosine similarity
+                        $score = $this->cosineSimilarity($embedding, array_values($chunkVector));
+                        
+                        $scored[] = [
+                            'id' => $chunk->id,
+                            'score' => $score,
+                            'metadata' => [
+                                'chunk_id' => $chunk->id,
+                                'document_id' => $chunk->document_id,
+                                'org_id' => $chunk->org_id,
+                            ]
+                        ];
+                    }
+                    
+                    $processedCount += count($batchChunks);
+                    
+                    // Intermediate logging for large datasets
+                    if ($processedCount % 10000 === 0) {
+                        Log::info('⚡ Batch processing progress', [
+                            'processed' => $processedCount,
+                            'total' => $totalChunks,
+                            'percent' => round(($processedCount / $totalChunks) * 100, 1)
+                        ]);
+                    }
                 }
                 
-                // Unpack binary to float array
-                $chunkVector = unpack('f*', $binaryData);
+                Log::info('✅ Batch processing complete', [
+                    'total_processed' => $processedCount,
+                    'chunks_scored' => count($scored)
+                ]);
+            } else {
+                // Small dataset: process all at once
+                $chunks = $query->get();
                 
-                if (empty($chunkVector)) {
-                    Log::warning('⚠️ Failed to unpack embedding', [
-                        'chunk_id' => $chunk->id,
-                        'embedding_type' => gettype($chunk->embedding),
-                        'driver' => $driver
-                    ]);
-                    continue;
+                foreach ($chunks as $chunk) {
+                    // Handle different binary formats for MySQL vs PostgreSQL
+                    $binaryData = $chunk->embedding;
+                    
+                    if ($driver === 'pgsql' && is_resource($binaryData)) {
+                        // PostgreSQL returns BYTEA as a stream resource
+                        $binaryData = stream_get_contents($binaryData);
+                    }
+                    
+                    // Unpack binary to float array
+                    $chunkVector = unpack('f*', $binaryData);
+                    
+                    if (empty($chunkVector)) {
+                        Log::warning('⚠️ Failed to unpack embedding', [
+                            'chunk_id' => $chunk->id,
+                            'embedding_type' => gettype($chunk->embedding),
+                            'driver' => $driver
+                        ]);
+                        continue;
+                    }
+                    
+                    // Calculate cosine similarity
+                    $score = $this->cosineSimilarity($embedding, array_values($chunkVector));
+                    
+                    $scored[] = [
+                        'id' => $chunk->id,
+                        'score' => $score,
+                        'metadata' => [
+                            'chunk_id' => $chunk->id,
+                            'document_id' => $chunk->document_id,
+                            'org_id' => $chunk->org_id,
+                        ]
+                    ];
                 }
-                
-                // Calculate cosine similarity
-                $score = $this->cosineSimilarity($embedding, array_values($chunkVector));
-                
-                $scored[] = [
-                    'id' => $chunk->id,
-                    'score' => $score,
-                    'metadata' => [
-                        'chunk_id' => $chunk->id,
-                        'document_id' => $chunk->document_id,
-                        'org_id' => $chunk->org_id,
-                    ]
-                ];
             }
             
             // Sort by score descending and take top K
@@ -248,7 +318,8 @@ class VectorStoreService
             
             Log::info('✅ Vector similarity search completed', [
                 'org_id' => $filterOrgId,
-                'chunks_searched' => count($chunks),
+                'chunks_searched' => count($scored),
+                'total_chunks' => $totalChunks,
                 'top_k' => $topK,
                 'query_time_ms' => $queryTime,
                 'top_score' => $topResults[0]['score'] ?? 0

@@ -248,6 +248,18 @@ class IngestConnectorJob implements ShouldQueue
                 break;
             }
 
+            // Check if document already has chunks - skip if already processed
+            $existingChunkCount = \App\Models\Chunk::where('document_id', $document->id)->count();
+            if ($existingChunkCount > 0) {
+                Log::info("⏭️ Document already processed, skipping: " . $document->title, [
+                    'document_id' => $document->id,
+                    'existing_chunks' => $existingChunkCount
+                ]);
+                $skippedFiles++;
+                $processedFiles++;
+                continue;
+            }
+
             // Check for duplicate document by content hash
             $metadata = $document->metadata ?? [];
             $tmpPath = $metadata['tmp_path'] ?? null;
@@ -1194,7 +1206,7 @@ class IngestConnectorJob implements ShouldQueue
                         $chunks++;
                     }
 
-                    // Generate embeddings and upload to Pinecone
+                    // Generate embeddings and store in local database
                     if (!empty($createdChunks)) {
                         Log::info("Generating embeddings for chunks", ['chunk_count' => count($createdChunks)]);
                         $this->generateAndUploadEmbeddings($createdChunks, $job);
@@ -1241,7 +1253,7 @@ class IngestConnectorJob implements ShouldQueue
     }
 
     /**
-     * Generate embeddings for chunks and upload to Pinecone
+     * Generate embeddings for chunks and store in local database
      */
     private function generateAndUploadEmbeddings(array $chunks, $job): void
     {
@@ -1280,7 +1292,7 @@ class IngestConnectorJob implements ShouldQueue
                 // Generate embeddings in batch with cost tracking
                 $embeddings = $embeddingService->embedBatch($texts, $this->orgId, $documentId, $job->id);
 
-                // Prepare vectors for Pinecone
+                // Prepare vectors for storage
                 $vectors = [];
                 foreach ($batch as $idx => $chunk) {
                     $vectors[] = [
@@ -1311,10 +1323,10 @@ class IngestConnectorJob implements ShouldQueue
                     }, $vectors), 0, 3)
                 ]);
 
-                // Upsert to Pinecone with org_id as namespace and cost tracking
+                // Store vectors in local database with org_id as namespace
                 $vectorStore->upsert($vectors, $this->orgId, $this->orgId, $documentId, $job->id);
 
-                Log::info("✅ Batch uploaded to Pinecone", [
+                Log::info("✅ Batch uploaded to database", [
                     'batch' => $batchIndex + 1,
                     'vectors_count' => count($vectors)
                 ]);
@@ -1694,7 +1706,7 @@ class IngestConnectorJob implements ShouldQueue
                         $chunks++;
                     }
 
-                    // Generate embeddings and upload to Pinecone
+                    // Generate embeddings and store in local database
                     if (!empty($createdChunks)) {
                         Log::info("Generating embeddings for chunks", ['chunk_count' => count($createdChunks)]);
                         $this->generateAndUploadEmbeddings($createdChunks, $job);
