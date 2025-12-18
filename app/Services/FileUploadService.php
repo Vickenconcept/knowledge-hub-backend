@@ -51,7 +51,28 @@ class FileUploadService
                 'invalidate' => true,
             ]);
 
-            return is_array($res) ? $res : ['result' => $res];
+            // Cloudinary SDK may return ApiResponse (object) or array.
+            if (is_array($res)) {
+                return $res;
+            }
+
+            if (is_object($res)) {
+                if (method_exists($res, 'getArrayCopy')) {
+                    /** @var array $arr */
+                    $arr = $res->getArrayCopy();
+                    return $arr;
+                }
+                if ($res instanceof \JsonSerializable) {
+                    $json = $res->jsonSerialize();
+                    return is_array($json) ? $json : ['result' => $json];
+                }
+                if (method_exists($res, 'toArray')) {
+                    $arr = $res->toArray();
+                    return is_array($arr) ? $arr : ['result' => $arr];
+                }
+            }
+
+            return ['result' => (string) $res];
         } catch (\Throwable $e) {
             Log::warning('Cloudinary destroy failed', [
                 'public_id' => $publicId,
