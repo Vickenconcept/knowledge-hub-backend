@@ -518,6 +518,8 @@ class ManualUploadController extends BaseConnectorController
                         'file_extension' => $ext,
                         'tmp_path' => $tmpPath, // Keep temp path for ingestion job
                         'extracted_text' => $extractedText, // Store extracted text for reuse
+                        'cloudinary_public_id' => $upload['public_id'] ?? null,
+                        'cloudinary_resource_type' => 'raw',
                     ], $classification['metadata'])
                 ]);
                 
@@ -642,6 +644,24 @@ class ManualUploadController extends BaseConnectorController
 
         if (!$document) {
             return $this->notFoundErrorResponse('Document');
+        }
+
+        // Best-effort: delete from Cloudinary too (continue even if it fails)
+        try {
+            $uploader = new FileUploadService();
+            $publicId = $document->metadata['cloudinary_public_id'] ?? null;
+            $resourceType = $document->metadata['cloudinary_resource_type'] ?? 'raw';
+
+            if (!empty($publicId)) {
+                $uploader->destroyByPublicId($publicId, $resourceType);
+            } else {
+                $uploader->destroyFromUrl($document->s3_path, $resourceType);
+            }
+        } catch (\Throwable $e) {
+            Log::warning('Cloudinary delete failed for manual upload deleteUpload (continuing)', [
+                'document_id' => $document->id,
+                'error' => $e->getMessage(),
+            ]);
         }
 
         // Delete from vector store

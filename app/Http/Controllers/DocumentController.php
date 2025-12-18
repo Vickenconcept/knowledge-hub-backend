@@ -189,6 +189,28 @@ class DocumentController extends Controller
             'title' => $doc->title,
             'user_id' => $request->user()->id,
         ]);
+
+        // Best-effort: delete file from Cloudinary if this document has a Cloudinary URL
+        try {
+            $uploader = new \App\Services\FileUploadService();
+            $cloudinaryPublicId = $doc->metadata['cloudinary_public_id'] ?? null;
+            $cloudinaryResourceType = $doc->metadata['cloudinary_resource_type'] ?? 'raw';
+
+            $cloudinaryRes = !empty($cloudinaryPublicId)
+                ? $uploader->destroyByPublicId($cloudinaryPublicId, $cloudinaryResourceType)
+                : $uploader->destroyFromUrl($doc->s3_path, $cloudinaryResourceType);
+
+            Log::info('Cloudinary delete attempted for document', [
+                'document_id' => $doc->id,
+                'public_id' => $cloudinaryPublicId,
+                'result' => $cloudinaryRes['result'] ?? ($cloudinaryRes['skipped'] ?? false ? 'skipped' : null),
+            ]);
+        } catch (\Throwable $e) {
+            Log::warning('Cloudinary delete failed for document (continuing DB delete)', [
+                'document_id' => $doc->id,
+                'error' => $e->getMessage(),
+            ]);
+        }
         
         // Get all chunk IDs for vector deletion
         $chunkIds = Chunk::where('document_id', $doc->id)->pluck('id')->all();
@@ -240,12 +262,32 @@ class DocumentController extends Controller
         
         $deletedCount = 0;
         $totalChunksDeleted = 0;
+
+        // Create once (avoid recreating Cloudinary client per document)
+        $uploader = new \App\Services\FileUploadService();
         
         foreach ($documentIds as $documentId) {
             $doc = Document::where('org_id', $orgId)->where('id', $documentId)->first();
             
             if (!$doc) {
                 continue; // Skip if not found or not owned by org
+            }
+
+            // Best-effort: delete file from Cloudinary if this document has a Cloudinary URL
+            try {
+                $cloudinaryPublicId = $doc->metadata['cloudinary_public_id'] ?? null;
+                $cloudinaryResourceType = $doc->metadata['cloudinary_resource_type'] ?? 'raw';
+
+                if (!empty($cloudinaryPublicId)) {
+                    $uploader->destroyByPublicId($cloudinaryPublicId, $cloudinaryResourceType);
+                } else {
+                    $uploader->destroyFromUrl($doc->s3_path, $cloudinaryResourceType);
+                }
+            } catch (\Throwable $e) {
+                Log::warning('Cloudinary delete failed for document in bulk destroy (continuing)', [
+                    'document_id' => $doc->id,
+                    'error' => $e->getMessage(),
+                ]);
             }
             
             // Get all chunk IDs for vector deletion
@@ -329,6 +371,10 @@ class DocumentController extends Controller
             'sha256' => null,
             'size' => $file->getSize(),
             's3_path' => $upload['secure_url'] ?? null,
+            'metadata' => array_filter([
+                'cloudinary_public_id' => $upload['public_id'] ?? null,
+                'cloudinary_resource_type' => 'raw',
+            ]),
             'fetched_at' => now(),
             'source_scope' => $sourceScope, // Use the scope from the request
         ]);

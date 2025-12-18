@@ -45,6 +45,12 @@ class FetchDocumentJob implements ShouldQueue
             $upload = $uploader->uploadRawPath($localPath, 'knowledgehub/raw');
             if (!empty($upload['secure_url'])) {
                 $document->s3_path = $upload['secure_url'];
+                $meta = is_array($document->metadata) ? $document->metadata : [];
+                if (!empty($upload['public_id'])) {
+                    $meta['cloudinary_public_id'] = $upload['public_id'];
+                    $meta['cloudinary_resource_type'] = 'raw';
+                }
+                $document->metadata = $meta;
                 $document->save();
             }
         }
