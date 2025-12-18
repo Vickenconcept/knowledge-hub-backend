@@ -203,7 +203,8 @@ class DocumentController extends Controller
             Log::info('Cloudinary delete attempted for document', [
                 'document_id' => $doc->id,
                 'public_id' => $cloudinaryPublicId,
-                'result' => $cloudinaryRes['result'] ?? ($cloudinaryRes['skipped'] ?? false ? 'skipped' : null),
+                'cloudinary_result' => $cloudinaryRes['result'] ?? ($cloudinaryRes['skipped'] ?? false ? 'skipped' : null),
+                'cloudinary_response' => $cloudinaryRes,
             ]);
         } catch (\Throwable $e) {
             Log::warning('Cloudinary delete failed for document (continuing DB delete)', [
