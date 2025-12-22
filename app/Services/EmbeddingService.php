@@ -33,8 +33,31 @@ class EmbeddingService
             ->post('https://api.openai.com/v1/embeddings', $payload);
             
         if (!$resp->successful()) {
-            Log::error('EmbeddingService error', ['status' => $resp->status(), 'body' => $resp->body()]);
-            throw new \RuntimeException('Failed to create embedding.');
+            $statusCode = $resp->status();
+            $responseBody = $resp->body();
+            $responseJson = $resp->json();
+            
+            // Extract error message from OpenAI response
+            $errorMessage = 'Failed to create embedding';
+            if (isset($responseJson['error']['message'])) {
+                $errorMessage = $responseJson['error']['message'];
+            } elseif (is_string($responseBody)) {
+                $errorMessage = $responseBody;
+            }
+            
+            // Log comprehensive error details
+            Log::error('EmbeddingService error', [
+                'status_code' => $statusCode,
+                'error_message' => $errorMessage,
+                'response_body' => $responseBody,
+                'org_id' => $orgId,
+                'document_id' => $documentId,
+                'ingest_job_id' => $ingestJobId,
+                'model' => $this->model,
+            ]);
+            
+            // Throw exception with detailed error message
+            throw new \RuntimeException("HTTP request returned status code {$statusCode}:\n{$responseBody}");
         }
 
         $json = $resp->json();
@@ -75,8 +98,32 @@ class EmbeddingService
             ->post('https://api.openai.com/v1/embeddings', $payload);
             
         if (!$resp->successful()) {
-            Log::error('EmbeddingService batch error', ['status' => $resp->status(), 'body' => $resp->body()]);
-            throw new \RuntimeException('Failed to create batch embeddings.');
+            $statusCode = $resp->status();
+            $responseBody = $resp->body();
+            $responseJson = $resp->json();
+            
+            // Extract error message from OpenAI response
+            $errorMessage = 'Failed to create batch embeddings';
+            if (isset($responseJson['error']['message'])) {
+                $errorMessage = $responseJson['error']['message'];
+            } elseif (is_string($responseBody)) {
+                $errorMessage = $responseBody;
+            }
+            
+            // Log comprehensive error details
+            Log::error('EmbeddingService batch error', [
+                'status_code' => $statusCode,
+                'error_message' => $errorMessage,
+                'response_body' => $responseBody,
+                'org_id' => $orgId,
+                'document_id' => $documentId,
+                'ingest_job_id' => $ingestJobId,
+                'batch_size' => count($texts),
+                'model' => $this->model,
+            ]);
+            
+            // Throw exception with detailed error message
+            throw new \RuntimeException("HTTP request returned status code {$statusCode}:\n{$responseBody}");
         }
 
         $json = $resp->json();

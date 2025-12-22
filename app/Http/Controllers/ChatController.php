@@ -757,16 +757,26 @@ class ChatController extends Controller
                 'query_preview' => isset($queryText) ? mb_substr($queryText, 0, 100) : null,
             ]);
             
-            // Check if it's a quota/rate limit error (429)
-            $isQuotaError = strpos($e->getMessage(), '429') !== false || 
-                           strpos($e->getMessage(), 'quota') !== false ||
-                           strpos($e->getMessage(), 'exceeded') !== false;
+            // Check if it's an OpenAI API quota/rate limit error (429)
+            // This is separate from internal subscription limits - it's the OpenAI API key quota
+            $isOpenAIQuotaError = strpos($e->getMessage(), '429') !== false || 
+                                  strpos($e->getMessage(), 'quota') !== false ||
+                                  strpos($e->getMessage(), 'exceeded') !== false ||
+                                  strpos($e->getMessage(), 'billing details') !== false;
             
-            if ($isQuotaError) {
+            if ($isOpenAIQuotaError) {
+                // Extract OpenAI error message if available
+                $openAIError = $e->getMessage();
+                if (preg_match('/"message":\s*"([^"]+)"/', $openAIError, $matches)) {
+                    $openAIError = $matches[1];
+                }
+                
                 return response()->json([
-                    'error' => 'API quota exceeded',
-                    'message' => 'The AI service quota has been exceeded. Please check your plan and billing details.',
-                    'details' => $e->getMessage()
+                    'error' => 'OpenAI API quota exceeded',
+                    'message' => 'The OpenAI API quota has been exceeded. This may be due to document indexing operations. Please check your OpenAI account billing and quota limits.',
+                    'error_type' => 'openai_api_quota',
+                    'details' => $openAIError,
+                    'note' => 'This is separate from your subscription plan limits. The OpenAI API key itself has exceeded its quota, likely from document indexing/embedding operations.'
                 ], 429);
             }
             
