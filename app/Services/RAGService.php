@@ -180,8 +180,32 @@ class RAGService
             ->post('https://api.openai.com/v1/chat/completions', $payload);
             
         if (!$resp->successful()) {
-            Log::error('RAGService LLM call failed', ['status' => $resp->status(), 'body' => $resp->body()]);
-            throw new \RuntimeException('LLM call failed.');
+            $statusCode = $resp->status();
+            $responseBody = $resp->body();
+            $responseJson = $resp->json();
+            
+            // Extract error message from OpenAI response
+            $errorMessage = 'LLM call failed';
+            if (isset($responseJson['error']['message'])) {
+                $errorMessage = $responseJson['error']['message'];
+            } elseif (is_string($responseBody)) {
+                $errorMessage = $responseBody;
+            }
+            
+            // Log comprehensive error details
+            Log::error('RAGService LLM call failed', [
+                'status_code' => $statusCode,
+                'error_message' => $errorMessage,
+                'response_body' => $responseBody,
+                'org_id' => $orgId,
+                'user_id' => $userId,
+                'conversation_id' => $conversationId,
+                'query_preview' => $queryText ? mb_substr($queryText, 0, 100) : null,
+                'model' => $this->chatModel,
+            ]);
+            
+            // Throw exception with detailed error message
+            throw new \RuntimeException("HTTP request returned status code {$statusCode}:\n{$responseBody}");
         }
 
         $json = $resp->json();

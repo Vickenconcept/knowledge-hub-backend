@@ -743,7 +743,33 @@ class ChatController extends Controller
         ]);
 
         } catch (\Exception $e) {
-            Log::error('ChatController@ask error: ' . $e->getMessage(), ['trace' => $e->getTraceAsString()]);
+            // Log comprehensive error details for production debugging
+            Log::error('ChatController@ask error', [
+                'error_message' => $e->getMessage(),
+                'error_class' => get_class($e),
+                'error_code' => $e->getCode(),
+                'file' => $e->getFile(),
+                'line' => $e->getLine(),
+                'trace' => $e->getTraceAsString(),
+                'user_id' => $user->id ?? null,
+                'org_id' => $orgId ?? null,
+                'conversation_id' => $conversation->id ?? null,
+                'query_preview' => isset($queryText) ? mb_substr($queryText, 0, 100) : null,
+            ]);
+            
+            // Check if it's a quota/rate limit error (429)
+            $isQuotaError = strpos($e->getMessage(), '429') !== false || 
+                           strpos($e->getMessage(), 'quota') !== false ||
+                           strpos($e->getMessage(), 'exceeded') !== false;
+            
+            if ($isQuotaError) {
+                return response()->json([
+                    'error' => 'API quota exceeded',
+                    'message' => 'The AI service quota has been exceeded. Please check your plan and billing details.',
+                    'details' => $e->getMessage()
+                ], 429);
+            }
+            
             return response()->json([
                 'error' => 'Internal server error',
                 'message' => $e->getMessage()
