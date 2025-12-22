@@ -502,32 +502,42 @@ class ConnectorController extends Controller
         // Get document IDs and chunk IDs for vector deletion
         $documentIds = $connector->documents()->pluck('id')->toArray();
 
-        // Best-effort: delete Cloudinary assets for all documents under this connector
+        // Cloudinary cleanup can be slow for connectors with many docs.
+        // Dispatch to queue so the HTTP request returns fast.
         try {
-            $uploader = new \App\Services\FileUploadService();
             $docsForCloudinary = \App\Models\Document::whereIn('id', $documentIds)
                 ->get(['id', 's3_path', 'metadata']);
 
+            $targets = [];
             foreach ($docsForCloudinary as $doc) {
-                try {
-                    $publicId = $doc->metadata['cloudinary_public_id'] ?? null;
-                    $resourceType = $doc->metadata['cloudinary_resource_type'] ?? 'raw';
+                $publicId = $doc->metadata['cloudinary_public_id'] ?? null;
+                $resourceType = $doc->metadata['cloudinary_resource_type'] ?? 'raw';
+                $url = $doc->s3_path;
 
-                    if (!empty($publicId)) {
-                        $uploader->destroyByPublicId($publicId, $resourceType);
-                    } else {
-                        $uploader->destroyFromUrl($doc->s3_path, $resourceType);
-                    }
-                } catch (\Throwable $e) {
-                    \Log::warning('Cloudinary delete failed for connector document (continuing)', [
-                        'connector_id' => $connector->id,
-                        'document_id' => $doc->id,
-                        'error' => $e->getMessage(),
-                    ]);
+                if (empty($publicId) && empty($url)) {
+                    continue;
                 }
+
+                $targets[] = [
+                    'document_id' => $doc->id,
+                    'public_id' => $publicId,
+                    'url' => $url,
+                    'resource_type' => $resourceType,
+                ];
             }
+
+            foreach (array_chunk($targets, 50) as $chunk) {
+                \App\Jobs\DeleteCloudinaryAssetsJob::dispatch($chunk)->onQueue('default');
+            }
+
+            \Log::info('Queued Cloudinary cleanup jobs for connector disconnect', [
+                'connector_id' => $connector->id,
+                'documents' => count($documentIds),
+                'cloudinary_targets' => count($targets),
+                'jobs_dispatched' => (int) ceil(count($targets) / 50),
+            ]);
         } catch (\Throwable $e) {
-            \Log::warning('Cloudinary bulk delete failed during connector disconnect (continuing)', [
+            \Log::warning('Could not queue Cloudinary cleanup jobs (continuing)', [
                 'connector_id' => $connector->id,
                 'error' => $e->getMessage(),
             ]);
