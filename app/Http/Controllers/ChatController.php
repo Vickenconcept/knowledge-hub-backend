@@ -219,50 +219,52 @@ class ChatController extends Controller
             // 2. Search documents if routing says so
             $snippets = [];
             if ($routing['search_documents']) {
-            $embedding = $embeddingService->embed($queryText, $orgId);
+                // Vector embedding of the query
+                $embedding = $embeddingService->embed($queryText, $orgId);
                 
                 // Build workspace-aware vector metadata filter
                 $vectorFilter = $this->buildWorkspaceAwareFilter($orgId, $user->id, $connectorIds, $searchScope, $workspaceIds);
                 
+                // Primary retrieval: vector similarity
                 $matches = $vectorStore->query($embedding, $topK, $orgId, $orgId, $conversation->id, $vectorFilter);
-            $chunkIds = array_map(fn($m) => $m['id'], $matches);
-            
-            Log::info('🔍 Vector search results', [
-                'user_id' => $user->id,
-                'org_id' => $orgId,
-                'search_scope' => $searchScope,
-                'vector_filter' => $vectorFilter,
-                'matches_count' => count($matches),
-                'chunk_ids' => $chunkIds
-            ]);
-
-            if (empty($chunkIds)) {
-                // FALLBACK: Check if user has any documents at all, if not, provide getting started guidance
-                $userDocumentCount = Document::where('org_id', $orgId)->count();
+                $chunkIds = array_map(fn($m) => $m['id'], $matches);
                 
-                if ($userDocumentCount === 0) {
-                    // New user with no documents - provide getting started guidance
-                    $gettingStartedResponse = $this->getGettingStartedGuidance($queryText);
+                Log::info('🔍 Vector search results', [
+                    'user_id' => $user->id,
+                    'org_id' => $orgId,
+                    'search_scope' => $searchScope,
+                    'vector_filter' => $vectorFilter,
+                    'matches_count' => count($matches),
+                    'chunk_ids' => $chunkIds
+                ]);
+
+                if (empty($chunkIds)) {
+                    // FALLBACK: Check if user has any documents at all, if not, provide getting started guidance
+                    $userDocumentCount = Document::where('org_id', $orgId)->count();
                     
-                    return response()->json([
-                        'answer' => $gettingStartedResponse,
-                        'sources' => [],
-                        'query' => $queryText,
-                        'result_count' => 0,
-                        'is_guidance' => true,
-                        'raw' => null
-                    ]);
-                } else {
-                    // User has documents but no relevant matches found
-                    return response()->json([
-                        'answer' => "I don't know — no relevant documents found.",
-                        'sources' => [],
-                        'query' => $queryText,
-                        'result_count' => 0,
-                        'raw' => null
-                    ]);
+                    if ($userDocumentCount === 0) {
+                        // New user with no documents - provide getting started guidance
+                        $gettingStartedResponse = $this->getGettingStartedGuidance($queryText);
+                        
+                        return response()->json([
+                            'answer' => $gettingStartedResponse,
+                            'sources' => [],
+                            'query' => $queryText,
+                            'result_count' => 0,
+                            'is_guidance' => true,
+                            'raw' => null
+                        ]);
+                    } else {
+                        // User has documents but no relevant matches found
+                        return response()->json([
+                            'answer' => "I don't know — no relevant documents found.",
+                            'sources' => [],
+                            'query' => $queryText,
+                            'result_count' => 0,
+                            'raw' => null
+                        ]);
+                    }
                 }
-            }
 
                 // 3. Fetch chunk rows with SECURITY FILTERING
                 $chunks = Chunk::whereIn('id', $chunkIds)
@@ -314,26 +316,31 @@ class ChatController extends Controller
                     'access_denied_count' => count($chunkIds) - count($filteredChunks)
                 ]);
 
-                // Build an ordered snippets array based on matches
-            foreach ($matches as $m) {
-                $cid = $m['id'];
-                if (!isset($chunks[$cid])) continue;
-                $c = $chunks[$cid];
-                $snippets[] = [
-                    'chunk_id' => $c->id,
-                    'document_id' => $c->document_id,
-                    'document_title' => $c->document->title ?? 'Unknown',
-                    'text' => $c->text,
-                    'char_start' => $c->char_start,
-                    'char_end' => $c->char_end,
+                // Build initial snippets array (vector-ranked)
+                foreach ($matches as $m) {
+                    $cid = $m['id'];
+                    if (!isset($chunks[$cid])) continue;
+                    $c = $chunks[$cid];
+                    $snippets[] = [
+                        'chunk_id' => $c->id,
+                        'document_id' => $c->document_id,
+                        'document_title' => $c->document->title ?? 'Unknown',
+                        'text' => $c->text,
+                        'char_start' => $c->char_start,
+                        'char_end' => $c->char_end,
+                        // Keep original vector score and a slot for hybrid score
+                        'vector_score' => $m['score'],
                         'score' => $m['score'],
                         'doc_type' => $c->document->doc_type ?? 'general',
                         'tags' => $c->document->tags ?? [],
                     ];
                 }
+
+                // 4. Hybrid lexical + semantic reranking of snippets
+                $snippets = $this->rerankSnippetsHybrid($snippets, $queryText);
             }
 
-            // 4. Intelligent Style Selection
+            // 5. Intelligent Style Selection
             // First, check if user explicitly requested a style in their query
             $styleInference = \App\Services\StyleInferenceService::detectExplicitStyleRequest($queryText);
             
@@ -490,7 +497,7 @@ class ChatController extends Controller
                 $answerText = str_replace(['\\n', '\n'], "\n", $answerText);
             }
 
-            // 5. Format sources with full details (title, URL, excerpt, type)
+            // 6. Format sources with full details (title, URL, excerpt, type)
             // Group by document to avoid duplicate sources
             $sourcesByDocument = [];
             
@@ -1346,6 +1353,73 @@ class ChatController extends Controller
             'sources' => $taggedSources,
             'workspace_stats' => $workspaceStats
         ];
+    }
+
+    /**
+     * Hybrid lexical + semantic reranker for retrieved snippets.
+     *
+     * Uses the original vector score plus a simple keyword-overlap score to
+     * compute a combined relevance score and reorder the snippets.
+     */
+    private function rerankSnippetsHybrid(array $snippets, string $query): array
+    {
+        if (empty($snippets)) {
+            return $snippets;
+        }
+
+        $queryLower = mb_strtolower($query);
+
+        // Very simple term extraction with stopword removal
+        $stopWords = [
+            'the','a','an','and','or','but','in','on','at','to','for','of','with','by',
+            'is','are','was','were','be','been','have','has','had','do','does','did',
+            'will','would','could','should','may','might','can','must','shall',
+            'what','who','where','when','why','how','tell','list','show','give','me'
+        ];
+
+        $rawTerms = preg_split('/[^a-z0-9]+/u', $queryLower) ?: [];
+        $terms = array_values(array_filter($rawTerms, function ($t) use ($stopWords) {
+            return $t !== '' && mb_strlen($t) > 2 && !in_array($t, $stopWords, true);
+        }));
+
+        // Avoid division by zero later
+        $termCount = max(1, count($terms));
+
+        foreach ($snippets as &$snippet) {
+            $textLower = mb_strtolower($snippet['text'] ?? '');
+            $titleLower = mb_strtolower($snippet['document_title'] ?? '');
+
+            $hits = 0;
+            foreach ($terms as $term) {
+                if ($term === '') {
+                    continue;
+                }
+                if (mb_strpos($textLower, $term) !== false) {
+                    $hits += 1;
+                }
+                if (mb_strpos($titleLower, $term) !== false) {
+                    $hits += 2; // title matches count a bit more
+                }
+            }
+
+            // Normalize keyword score between 0 and 1
+            $keywordScore = $hits > 0 ? min(1.0, $hits / $termCount) : 0.0;
+
+            $vectorScore = (float) ($snippet['vector_score'] ?? $snippet['score'] ?? 0.0);
+
+            // Combined score: mostly vector, slightly boosted by keyword overlap
+            $combined = (0.7 * $vectorScore) + (0.3 * $keywordScore);
+
+            $snippet['keyword_score'] = $keywordScore;
+            $snippet['score'] = $combined;
+        }
+        unset($snippet);
+
+        usort($snippets, function ($a, $b) {
+            return ($b['score'] ?? 0.0) <=> ($a['score'] ?? 0.0);
+        });
+
+        return $snippets;
     }
 
     /**
