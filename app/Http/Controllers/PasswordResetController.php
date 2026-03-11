@@ -2,12 +2,11 @@
 
 namespace App\Http\Controllers;
 
-use App\Mail\PasswordResetMail;
 use App\Models\User;
+use App\Services\EmailService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
-use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Str;
 
@@ -50,25 +49,13 @@ class PasswordResetController extends Controller
         $frontendUrl = env('FRONTEND_URL', 'http://localhost:5173');
         $resetUrl = "{$frontendUrl}/reset-password?token={$token}&email=" . urlencode($email);
 
-        // Send the email
-        try {
-            Mail::to($email)->send(new PasswordResetMail($resetUrl, $user->name));
+        // Send the email via Resend
+        EmailService::sendPasswordResetEmail($user, $resetUrl);
 
-            return response()->json([
-                'success' => true,
-                'message' => 'Password reset link has been sent to your email address.',
-            ], 200);
-        } catch (\Exception $e) {
-            \Log::error('Password reset email failed', [
-                'email' => $email,
-                'error' => $e->getMessage(),
-            ]);
-
-            return response()->json([
-                'success' => false,
-                'message' => 'Failed to send password reset email. Please try again later.',
-            ], 500);
-        }
+        return response()->json([
+            'success' => true,
+            'message' => 'Password reset link has been sent to your email address.',
+        ], 200);
     }
 
     /**

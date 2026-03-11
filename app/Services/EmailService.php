@@ -36,10 +36,26 @@ class EmailService
         self::sendViaResend($user->email, $subject, $text, $html);
     }
 
+    public static function sendPasswordResetEmail(User $user, string $resetUrl): void
+    {
+        $subject = 'Reset Your Password - KHub';
+        $text = "Hi {$user->name},\n\n"
+              . "We received a request to reset the password for your KHub account.\n\n"
+              . "Click the link below to choose a new password:\n{$resetUrl}\n\n"
+              . "This link will expire in 60 minutes. If you didn't request a password reset, you can safely ignore this email.\n\n"
+              . "Best,\n"
+              . "The KHub Team";
+
+        $html = nl2br(e($text));
+
+        self::sendViaResend($user->email, $subject, $text, $html);
+    }
+
     protected static function sendViaResend(string $to, string $subject, string $text, string $html): void
     {
         $apiKey = env('RESEND_API_KEY');
-        $from = env('RESEND_FROM_EMAIL');
+        // Support both RESEND_FROM_EMAIL and RESEND_EMAIL_FROM
+        $from = env('RESEND_FROM_EMAIL') ?: env('RESEND_EMAIL_FROM');
 
         if (!$apiKey || !$from) {
             Log::warning('Resend email skipped: missing RESEND_API_KEY or RESEND_FROM_EMAIL');
