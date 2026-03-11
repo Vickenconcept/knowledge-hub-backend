@@ -5,6 +5,8 @@ namespace App\Http\Controllers;
 use Illuminate\Http\Request;
 use App\Models\Organization;
 use App\Models\User;
+use App\Models\Document;
+use App\Models\Connector;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
@@ -229,7 +231,10 @@ class AdminOrganizationController extends Controller
     }
 
     /**
-     * Delete an organization and all associated data (CASCADE)
+     * Delete an organization and all associated data.
+     *
+     * We explicitly delete dependent records (documents, connectors, etc.)
+     * before deleting the organization to avoid production FK constraint issues.
      */
     public function destroy(Request $request, string $id)
     {
@@ -239,14 +244,23 @@ class AdminOrganizationController extends Controller
             if ($checkResult) {
                 return $checkResult;
             }
+
             $organization = Organization::with(['users', 'documents', 'connectors'])->findOrFail($id);
 
             $userCount = $organization->users->count();
             $documentCount = $organization->documents->count();
             $connectorCount = $organization->connectors->count();
 
-            // Delete the organization (CASCADE deletes related data)
-            $organization->delete();
+            DB::transaction(function () use ($organization) {
+                // Delete documents for this org first to avoid FK issues
+                Document::where('org_id', $organization->id)->delete();
+
+                // Delete connectors for this org (their own cascades handle downstream data)
+                Connector::where('org_id', $organization->id)->delete();
+
+                // Finally delete the organization itself
+                $organization->delete();
+            });
 
             Log::warning('Organization deleted with cascade', [
                 'org_id' => $id,
