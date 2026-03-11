@@ -256,8 +256,10 @@ class DocumentExtractionService
                     $rowValues = [];
 
                     for ($col = 1; $col <= $highestColumnIndex; $col++) {
-                        $cell = $sheet->getCellByColumnAndRow($col, $row);
-                        $value = $cell->getFormattedValue();
+                        // Convert numeric column index to letter (A, B, C, ...) then row number (1, 2, 3, ...)
+                        $columnLetter = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::stringFromColumnIndex($col);
+                        $cell = $sheet->getCell($columnLetter . $row);
+                        $value = $cell ? $cell->getFormattedValue() : '';
                         $rowValues[] = trim((string) $value);
                     }
 
