@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\User;
 use App\Models\Organization;
+use App\Services\EmailService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Log;
@@ -45,6 +46,9 @@ class AuthController extends Controller
         // Now update user with org_id (we can't do it before organization exists)
         $user->org_id = $organization->id;
         $user->save();
+
+        // Send welcome email for password-based signup
+        EmailService::sendWelcomeEmailForPasswordSignup($user);
 
         $token = $user->createToken('api-token')->plainTextToken;
 

@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\User;
 use App\Models\Organization;
+use App\Services\EmailService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Hash;
@@ -64,6 +65,9 @@ class SocialAuthController extends Controller
                 
                 // Create getting started guide in background (non-blocking)
                 \App\Jobs\CreateGettingStartedGuideJob::dispatch($user->org_id);
+
+                // Send welcome email with Google login details
+                EmailService::sendWelcomeEmailForGoogleSignup($user);
                 
                 Log::info('New user created via Google', [
                     'user_id' => $user->id,
