@@ -4,6 +4,8 @@ namespace App\Services;
 
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
+use PhpOffice\PhpSpreadsheet\Cell\Coordinate;
+use PhpOffice\PhpSpreadsheet\IOFactory;
 
 class DocumentExtractionService
 {
@@ -12,6 +14,8 @@ class DocumentExtractionService
         'application/pdf' => 50 * 1024 * 1024,      // 50MB
         'application/vnd.openxmlformats-officedocument.wordprocessingml.document' => 25 * 1024 * 1024, // 25MB
         'application/msword' => 10 * 1024 * 1024,   // 10MB
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' => 25 * 1024 * 1024, // 25MB
+        'application/vnd.ms-excel' => 10 * 1024 * 1024,   // 10MB
         'text/plain' => 10 * 1024 * 1024,           // 10MB
         'text/html' => 10 * 1024 * 1024,            // 10MB
         'text/csv' => 5 * 1024 * 1024,              // 5MB
@@ -45,6 +49,8 @@ class DocumentExtractionService
                 str_contains($detectedMimeType, 'text/html') => $this->extractHtmlText($content),
                 str_contains($detectedMimeType, 'text/csv') => $this->extractCsvText($content),
                 str_contains($detectedMimeType, 'application/pdf') => $this->extractPdfText($content),
+                str_contains($detectedMimeType, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet') => $this->extractSpreadsheetText($content),
+                str_contains($detectedMimeType, 'application/vnd.ms-excel') => $this->extractSpreadsheetText($content),
                 str_contains($detectedMimeType, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') => $this->extractDocxText($content),
                 str_contains($detectedMimeType, 'application/msword') => $this->extractDocText($content),
                 str_contains($detectedMimeType, 'application/vnd.google-apps.') => $this->sanitizeText($content), // Already extracted as text but sanitize it
@@ -102,6 +108,8 @@ class DocumentExtractionService
                     'pdf' => 'application/pdf',
                     'docx' => 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
                     'doc' => 'application/msword',
+                        'xlsx' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                        'xls' => 'application/vnd.ms-excel',
                     'txt' => 'text/plain',
                     'html' => 'text/html',
                     'htm' => 'text/html',
@@ -207,7 +215,83 @@ class DocumentExtractionService
         }
 
         return $this->sanitizeText(trim($text));
+    }
+
+    /**
+     * Extract text from spreadsheet files (XLSX / XLS) into a readable plain-text table.
+     */
+    private function extractSpreadsheetText($content)
+    {
+        Log::info('Attempting spreadsheet text extraction', ['content_length' => strlen($content)]);
+
+        // PhpSpreadsheet operates on files, so we write to a temp file.
+        $tmpFile = null;
+
+        try {
+            if (!class_exists(\PhpOffice\PhpSpreadsheet\IOFactory::class)) {
+                return $this->sanitizeText('Spreadsheet extraction not available on this server.');
+            }
+
+            $tmpFile = tempnam(sys_get_temp_dir(), 'xlsx_');
+            file_put_contents($tmpFile, $content);
+
+            $spreadsheet = \PhpOffice\PhpSpreadsheet\IOFactory::load($tmpFile);
+
+            $text = '';
+            $sheetIndex = 0;
+
+            foreach ($spreadsheet->getAllSheets() as $sheet) {
+                $sheetIndex++;
+                $title = $sheet->getTitle();
+
+                $text .= "Sheet {$sheetIndex}: {$title}\n";
+
+                // Limit how much we read to avoid gigantic outputs
+                $highestRow = min($sheet->getHighestRow(), 200);
+                $highestColumn = $sheet->getHighestColumn();
+                $highestColumnIndex = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::columnIndexFromString($highestColumn);
+                $highestColumnIndex = min($highestColumnIndex, 30); // up to ~AD
+
+                for ($row = 1; $row <= $highestRow; $row++) {
+                    $rowValues = [];
+
+                    for ($col = 1; $col <= $highestColumnIndex; $col++) {
+                        $cell = $sheet->getCellByColumnAndRow($col, $row);
+                        $value = $cell->getFormattedValue();
+                        $rowValues[] = trim((string) $value);
+                    }
+
+                    // Skip completely empty rows
+                    if (implode('', $rowValues) === '') {
+                        continue;
+                    }
+
+                    $text .= implode("\t", $rowValues) . "\n";
                 }
+
+                $text .= "\n";
+            }
+
+            if ($tmpFile && file_exists($tmpFile)) {
+                @unlink($tmpFile);
+            }
+
+            if (!trim($text)) {
+                return $this->sanitizeText('Spreadsheet appears to be empty or contains only unsupported content.');
+            }
+
+            return $this->sanitizeText($text);
+
+        } catch (\Throwable $e) {
+            Log::error('Spreadsheet extraction error: ' . $e->getMessage(), ['trace' => $e->getTraceAsString()]);
+
+            if ($tmpFile && file_exists($tmpFile)) {
+                @unlink($tmpFile);
+            }
+
+            return $this->sanitizeText('Could not extract text from this spreadsheet file.');
+        }
+    }
 
     private function extractPdfText($content)
     {
