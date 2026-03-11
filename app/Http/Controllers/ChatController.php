@@ -124,16 +124,6 @@ class ChatController extends Controller
             // Route query to appropriate context sources
             $routing = \App\Services\ContextRouter::routeQuery($queryText, $conversationHistory);
             
-            Log::info('Context routing decision', [
-                'query' => $queryText,
-                'route_type' => $routing['route_type'],
-                'confidence' => $routing['confidence'],
-                'reasoning' => $routing['reasoning'],
-                'search_documents' => $routing['search_documents'],
-                'search_messages' => $routing['search_messages'],
-                'attach_last_answer' => $routing['attach_last_answer'],
-            ]);
-            
             // Handle SESSION MEMORY QUERIES (last week, previous conversations)
             if (\App\Services\ConversationMemoryService::isSessionMemoryQuery($queryText)) {
                 Log::info('Session memory query detected', ['query' => $queryText]);
@@ -219,50 +209,52 @@ class ChatController extends Controller
             // 2. Search documents if routing says so
             $snippets = [];
             if ($routing['search_documents']) {
-            $embedding = $embeddingService->embed($queryText, $orgId);
+                // Vector embedding of the query
+                $embedding = $embeddingService->embed($queryText, $orgId);
                 
                 // Build workspace-aware vector metadata filter
                 $vectorFilter = $this->buildWorkspaceAwareFilter($orgId, $user->id, $connectorIds, $searchScope, $workspaceIds);
                 
+                // Primary retrieval: vector similarity
                 $matches = $vectorStore->query($embedding, $topK, $orgId, $orgId, $conversation->id, $vectorFilter);
-            $chunkIds = array_map(fn($m) => $m['id'], $matches);
-            
-            Log::info('🔍 Vector search results', [
-                'user_id' => $user->id,
-                'org_id' => $orgId,
-                'search_scope' => $searchScope,
-                'vector_filter' => $vectorFilter,
-                'matches_count' => count($matches),
-                'chunk_ids' => $chunkIds
-            ]);
-
-            if (empty($chunkIds)) {
-                // FALLBACK: Check if user has any documents at all, if not, provide getting started guidance
-                $userDocumentCount = Document::where('org_id', $orgId)->count();
+                $chunkIds = array_map(fn($m) => $m['id'], $matches);
                 
-                if ($userDocumentCount === 0) {
-                    // New user with no documents - provide getting started guidance
-                    $gettingStartedResponse = $this->getGettingStartedGuidance($queryText);
+                Log::info('🔍 Vector search results', [
+                    'user_id' => $user->id,
+                    'org_id' => $orgId,
+                    'search_scope' => $searchScope,
+                    'vector_filter' => $vectorFilter,
+                    'matches_count' => count($matches),
+                    'chunk_ids' => $chunkIds
+                ]);
+
+                if (empty($chunkIds)) {
+                    // FALLBACK: Check if user has any documents at all, if not, provide getting started guidance
+                    $userDocumentCount = Document::where('org_id', $orgId)->count();
                     
-                    return response()->json([
-                        'answer' => $gettingStartedResponse,
-                        'sources' => [],
-                        'query' => $queryText,
-                        'result_count' => 0,
-                        'is_guidance' => true,
-                        'raw' => null
-                    ]);
-                } else {
-                    // User has documents but no relevant matches found
-                    return response()->json([
-                        'answer' => "I don't know — no relevant documents found.",
-                        'sources' => [],
-                        'query' => $queryText,
-                        'result_count' => 0,
-                        'raw' => null
-                    ]);
+                    if ($userDocumentCount === 0) {
+                        // New user with no documents - provide getting started guidance
+                        $gettingStartedResponse = $this->getGettingStartedGuidance($queryText);
+                        
+                        return response()->json([
+                            'answer' => $gettingStartedResponse,
+                            'sources' => [],
+                            'query' => $queryText,
+                            'result_count' => 0,
+                            'is_guidance' => true,
+                            'raw' => null
+                        ]);
+                    } else {
+                        // User has documents but no relevant matches found
+                        return response()->json([
+                            'answer' => "I don't know — no relevant documents found.",
+                            'sources' => [],
+                            'query' => $queryText,
+                            'result_count' => 0,
+                            'raw' => null
+                        ]);
+                    }
                 }
-            }
 
                 // 3. Fetch chunk rows with SECURITY FILTERING
                 $chunks = Chunk::whereIn('id', $chunkIds)
@@ -314,26 +306,31 @@ class ChatController extends Controller
                     'access_denied_count' => count($chunkIds) - count($filteredChunks)
                 ]);
 
-                // Build an ordered snippets array based on matches
-            foreach ($matches as $m) {
-                $cid = $m['id'];
-                if (!isset($chunks[$cid])) continue;
-                $c = $chunks[$cid];
-                $snippets[] = [
-                    'chunk_id' => $c->id,
-                    'document_id' => $c->document_id,
-                    'document_title' => $c->document->title ?? 'Unknown',
-                    'text' => $c->text,
-                    'char_start' => $c->char_start,
-                    'char_end' => $c->char_end,
+                // Build initial snippets array (vector-ranked)
+                foreach ($matches as $m) {
+                    $cid = $m['id'];
+                    if (!isset($chunks[$cid])) continue;
+                    $c = $chunks[$cid];
+                    $snippets[] = [
+                        'chunk_id' => $c->id,
+                        'document_id' => $c->document_id,
+                        'document_title' => $c->document->title ?? 'Unknown',
+                        'text' => $c->text,
+                        'char_start' => $c->char_start,
+                        'char_end' => $c->char_end,
+                        // Keep original vector score and a slot for hybrid score
+                        'vector_score' => $m['score'],
                         'score' => $m['score'],
                         'doc_type' => $c->document->doc_type ?? 'general',
                         'tags' => $c->document->tags ?? [],
                     ];
                 }
+
+                // 4. Hybrid lexical + semantic reranking of snippets
+                $snippets = $this->rerankSnippetsHybrid($snippets, $queryText);
             }
 
-            // 4. Intelligent Style Selection
+            // 5. Intelligent Style Selection
             // First, check if user explicitly requested a style in their query
             $styleInference = \App\Services\StyleInferenceService::detectExplicitStyleRequest($queryText);
             
@@ -394,24 +391,6 @@ class ChatController extends Controller
             // Get enhanced context based on routing decision
             $enhancedContext = \App\Services\ContextRouter::buildEnhancedContext($routing, $conversation->id, $conversationHistory);
             
-            // Log context before RAG processing
-            Log::info('🧠 RAG CONTEXT ASSEMBLY', [
-                'user_id' => $user->id,
-                'query' => $queryText,
-                'snippets_count' => count($snippets),
-                'snippet_previews' => array_map(function($s) {
-                    return [
-                        'chunk_id' => $s['chunk_id'],
-                        'document_id' => $s['document_id'],
-                        'score' => $s['score'],
-                        'text_preview' => mb_substr($s['text'], 0, 100) . '...'
-                    ];
-                }, array_slice($snippets, 0, 3)),
-                'response_style' => $responseStyle,
-                'routing' => $routing,
-                'enhanced_context_length' => is_array($enhancedContext['conversation_history'] ?? null) ? count($enhancedContext['conversation_history']) : strlen($enhancedContext['conversation_history'] ?? '')
-            ]);
-            
             // Pass routing metadata to RAG for intelligent prompt building
             $prompt = $rag->assemblePrompt(
                 $queryText, 
@@ -426,39 +405,12 @@ class ChatController extends Controller
             $styleConfig = \App\Services\ResponseStyleService::getStyleInstructions($responseStyle);
             $maxTokens = $styleConfig['config']['max_tokens'] ?? 1500;
             
-            Log::info('📝 RAG PROMPT ASSEMBLED', [
-                'user_id' => $user->id,
-                'prompt_length' => strlen($prompt),
-                'prompt_preview' => mb_substr($prompt, 0, 500) . '...',
-                'max_tokens' => $maxTokens,
-                'style' => $responseStyle,
-                'detail_level' => $styleConfig['config']['detail_level']
-            ]);
-            
             $llmResponse = $rag->callLLM($prompt, $maxTokens, $orgId, $user->id, $conversation->id, $queryText);
-            
-            Log::info('🤖 LLM RESPONSE RECEIVED', [
-                'user_id' => $user->id,
-                'response_type' => gettype($llmResponse),
-                'response_preview' => is_string($llmResponse) ? mb_substr($llmResponse, 0, 200) . '...' : 'Non-string response',
-                'response_length' => is_string($llmResponse) ? strlen($llmResponse) : 'N/A',
-                'has_answer_key' => isset($llmResponse['answer']),
-                'answer_preview' => isset($llmResponse['answer']) ? mb_substr($llmResponse['answer'], 0, 200) . '...' : 'No answer key'
-            ]);
 
             // Parse and normalize the LLM response into a strict contract
             $rawAnswer = $llmResponse['answer'] ?? '';
             $answerText = is_string($rawAnswer) ? $rawAnswer : '';
             $llmSources = [];
-            
-            Log::info('📋 PARSING LLM RESPONSE', [
-                'user_id' => $user->id,
-                'raw_answer_type' => gettype($rawAnswer),
-                'raw_answer_preview' => is_string($rawAnswer) ? mb_substr($rawAnswer, 0, 300) . '...' : 'Non-string',
-                'answer_text_preview' => is_string($answerText) ? mb_substr($answerText, 0, 300) . '...' : 'Non-string',
-                'full_response_keys' => array_keys($llmResponse),
-                'full_response_structure' => json_encode($llmResponse)
-            ]);
 
             // Case 1: answer is a JSON string { answer, sources }
             if (is_string($answerText)) {
@@ -478,35 +430,16 @@ class ChatController extends Controller
                 $llmSources = $rawAnswer['sources'] ?? $llmSources;
             }
             
-            Log::info('🔍 LLM SOURCES EXTRACTED', [
-                'user_id' => $user->id,
-                'llm_sources_count' => count($llmSources),
-                'llm_sources' => $llmSources,
-                'llm_sources_type' => gettype($llmSources)
-            ]);
-
             // Convert literal \n to actual newlines for better formatting
             if (is_string($answerText)) {
                 $answerText = str_replace(['\\n', '\n'], "\n", $answerText);
             }
 
-            // 5. Format sources with full details (title, URL, excerpt, type)
+            // 6. Format sources with full details (title, URL, excerpt, type)
             // Group by document to avoid duplicate sources
             $sourcesByDocument = [];
             
-            Log::info('🔍 PROCESSING SNIPPETS FOR SOURCES', [
-                'user_id' => $user->id,
-                'snippets_count' => count($snippets),
-                'query' => $queryText,
-                'snippet_previews' => array_map(function($s) {
-                    return [
-                        'chunk_id' => $s['chunk_id'],
-                        'document_id' => $s['document_id'],
-                        'score' => $s['score'],
-                        'text_preview' => mb_substr($s['text'], 0, 100) . '...'
-                    ];
-                }, array_slice($snippets, 0, 3))
-            ]);
+            Log::info('🔍 PROCESSING SNIPPETS FOR SOURCES');
             
             foreach ($snippets as $idx => $snippet) {
                 $chunk = $chunks[$snippet['chunk_id']] ?? null;
@@ -646,18 +579,36 @@ class ChatController extends Controller
 
             // If LLM provided sources, use them (trust the AI's judgment), otherwise use filtered sources
             if (!empty($llmSources) && is_array($llmSources)) {
-                Log::info('🎯 Using LLM-selected sources', [
-                    'user_id' => $user->id,
-                    'llm_sources_count' => count($llmSources),
-                    'llm_sources' => $llmSources,
-                    'formatted_sources_count' => count($formattedSources)
-                ]);
-                
+                // Normalize LLM sources:
+                // - If they are document IDs, use as-is.
+                // - If they are numeric (e.g. "1", "2"), treat as 1-based indices into formattedSources.
+                $llmSourceIds = [];
+                $firstIsArray = is_array($llmSources[0] ?? null);
+
+                if ($firstIsArray) {
+                    foreach ($llmSources as $s) {
+                        if (isset($s['document_id'])) {
+                            $llmSourceIds[] = $s['document_id'];
+                        }
+                    }
+                } else {
+                    foreach ($llmSources as $raw) {
+                        // Numeric index reference
+                        if (is_int($raw) || (is_string($raw) && ctype_digit($raw))) {
+                            $idx = (int) $raw;
+                            if ($idx >= 1 && $idx <= count($formattedSources)) {
+                                $llmSourceIds[] = $formattedSources[$idx - 1]['document_id'];
+                            }
+                        } elseif (is_string($raw) && $raw !== '') {
+                            // Assume this is a direct document_id
+                            $llmSourceIds[] = $raw;
+                        }
+                    }
+                }
+
+                $llmSourceIds = array_values(array_unique($llmSourceIds));
+
                 // Filter formatted sources to only those the LLM selected
-                $llmSourceIds = is_array($llmSources[0] ?? null) 
-                    ? array_map(fn($s) => $s['document_id'] ?? $s, $llmSources) 
-                    : $llmSources;
-                
                 $filteredSources = array_filter($formattedSources, function($source) use ($llmSourceIds) {
                     return in_array($source['document_id'], $llmSourceIds);
                 });
@@ -1346,6 +1297,73 @@ class ChatController extends Controller
             'sources' => $taggedSources,
             'workspace_stats' => $workspaceStats
         ];
+    }
+
+    /**
+     * Hybrid lexical + semantic reranker for retrieved snippets.
+     *
+     * Uses the original vector score plus a simple keyword-overlap score to
+     * compute a combined relevance score and reorder the snippets.
+     */
+    private function rerankSnippetsHybrid(array $snippets, string $query): array
+    {
+        if (empty($snippets)) {
+            return $snippets;
+        }
+
+        $queryLower = mb_strtolower($query);
+
+        // Very simple term extraction with stopword removal
+        $stopWords = [
+            'the','a','an','and','or','but','in','on','at','to','for','of','with','by',
+            'is','are','was','were','be','been','have','has','had','do','does','did',
+            'will','would','could','should','may','might','can','must','shall',
+            'what','who','where','when','why','how','tell','list','show','give','me'
+        ];
+
+        $rawTerms = preg_split('/[^a-z0-9]+/u', $queryLower) ?: [];
+        $terms = array_values(array_filter($rawTerms, function ($t) use ($stopWords) {
+            return $t !== '' && mb_strlen($t) > 2 && !in_array($t, $stopWords, true);
+        }));
+
+        // Avoid division by zero later
+        $termCount = max(1, count($terms));
+
+        foreach ($snippets as &$snippet) {
+            $textLower = mb_strtolower($snippet['text'] ?? '');
+            $titleLower = mb_strtolower($snippet['document_title'] ?? '');
+
+            $hits = 0;
+            foreach ($terms as $term) {
+                if ($term === '') {
+                    continue;
+                }
+                if (mb_strpos($textLower, $term) !== false) {
+                    $hits += 1;
+                }
+                if (mb_strpos($titleLower, $term) !== false) {
+                    $hits += 2; // title matches count a bit more
+                }
+            }
+
+            // Normalize keyword score between 0 and 1
+            $keywordScore = $hits > 0 ? min(1.0, $hits / $termCount) : 0.0;
+
+            $vectorScore = (float) ($snippet['vector_score'] ?? $snippet['score'] ?? 0.0);
+
+            // Combined score: mostly vector, slightly boosted by keyword overlap
+            $combined = (0.7 * $vectorScore) + (0.3 * $keywordScore);
+
+            $snippet['keyword_score'] = $keywordScore;
+            $snippet['score'] = $combined;
+        }
+        unset($snippet);
+
+        usort($snippets, function ($a, $b) {
+            return ($b['score'] ?? 0.0) <=> ($a['score'] ?? 0.0);
+        });
+
+        return $snippets;
     }
 
     /**

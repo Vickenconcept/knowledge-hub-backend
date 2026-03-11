@@ -170,12 +170,6 @@ class AuthController extends Controller
 
             // Check if token is expired
             if ($accessToken->expires_at && $accessToken->expires_at->isPast()) {
-                Log::warning('Token validation failed - token expired', [
-                    'token_id' => $accessToken->id,
-                    'expires_at' => $accessToken->expires_at,
-                    'ip' => $request->ip()
-                ]);
-                
                 return response()->json([
                     'success' => false,
                     'valid' => false,
@@ -199,11 +193,6 @@ class AuthController extends Controller
                 ], 401);
             }
 
-            Log::info('Token validation successful', [
-                'user_id' => $user->id,
-                'email' => $user->email,
-                'ip' => $request->ip()
-            ]);
 
             return response()->json([
                 'success' => true,
@@ -213,12 +202,6 @@ class AuthController extends Controller
             ]);
 
         } catch (\Exception $e) {
-            Log::error('Token validation error', [
-                'error' => $e->getMessage(),
-                'ip' => $request->ip(),
-                'user_agent' => $request->userAgent()
-            ]);
-            
             return response()->json([
                 'success' => false,
                 'valid' => false,
@@ -249,11 +232,6 @@ class AuthController extends Controller
             // Create new token
             $token = $user->createToken('api-token')->plainTextToken;
 
-            Log::info('Token refreshed successfully', [
-                'user_id' => $user->id,
-                'email' => $user->email
-            ]);
-
             return response()->json([
                 'success' => true,
                 'user' => $user,
@@ -262,11 +240,6 @@ class AuthController extends Controller
             ]);
 
         } catch (\Exception $e) {
-            Log::error('Token refresh error', [
-                'error' => $e->getMessage(),
-                'user_id' => $request->user()?->id
-            ]);
-            
             return response()->json([
                 'success' => false,
                 'message' => 'Failed to refresh token'

@@ -112,10 +112,6 @@ class StyleInferenceService
         $inferredStyle = self::inferStyleFromQuery($query);
         
         if ($inferredStyle) {
-            \Log::info('Style inferred from query', [
-                'query' => $query,
-                'inferred_style' => $inferredStyle
-            ]);
             return $inferredStyle;
         }
         

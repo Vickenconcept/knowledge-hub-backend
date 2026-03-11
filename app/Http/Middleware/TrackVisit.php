@@ -29,14 +29,7 @@ class TrackVisit
 
         try {
             $user = $request->user();
-            Log::info('Visit logging start', [
-                'ip' => $request->ip(),
-                'method' => $request->method(),
-                'path' => '/' . ltrim($path, '/'),
-                'referrer' => (string) $request->header('Referer'),
-                'user_id' => $user?->id,
-                'org_id' => $user?->org_id,
-            ]);
+          
             Visit::create([
                 'id' => (string) Str::uuid(),
                 'ip_address' => $request->ip(),
@@ -47,7 +40,6 @@ class TrackVisit
                 'user_id' => $user?->id,
                 'org_id' => $user?->org_id,
             ]);
-            Log::info('Visit logging saved');
         } catch (\Throwable $e) {
             // Never block the request if logging fails
             Log::warning('Visit logging failed', [

@@ -35,7 +35,7 @@ class ContextRouter
             $routing['confidence'] = 0.95;
             $routing['reasoning'] = 'User is asking about the conversation itself';
             
-            Log::info('ContextRouter: META query detected', [
+            Log::debug('ContextRouter: META query detected', [
                 'query' => $query,
                 'route' => 'messages_only'
             ]);
@@ -54,7 +54,7 @@ class ContextRouter
             $routing['confidence'] = $refinementDetection['confidence'];
             $routing['reasoning'] = $refinementDetection['reasoning'];
             
-            Log::info('ContextRouter: REFINEMENT query detected', [
+            Log::debug('ContextRouter: REFINEMENT query detected', [
                 'query' => $query,
                 'route' => 'hybrid_with_last_answer',
                 'keywords' => $refinementDetection['keywords_found']
@@ -73,7 +73,7 @@ class ContextRouter
             $routing['confidence'] = $pronounCheck['confidence'];
             $routing['reasoning'] = $pronounCheck['reasoning'];
             
-            Log::info('ContextRouter: PRONOUN dependency detected', [
+            Log::debug('ContextRouter: PRONOUN dependency detected', [
                 'query' => $query,
                 'route' => 'hybrid',
                 'pronouns' => $pronounCheck['pronouns_found']
@@ -92,7 +92,7 @@ class ContextRouter
             $routing['confidence'] = $contextCheck['confidence'];
             $routing['reasoning'] = $contextCheck['reasoning'];
             
-            Log::info('ContextRouter: CONTEXT reference detected', [
+            Log::debug('ContextRouter: CONTEXT reference detected', [
                 'query' => $query,
                 'route' => 'hybrid',
                 'keywords' => $contextCheck['keywords_found']
@@ -105,7 +105,7 @@ class ContextRouter
         $routing['confidence'] = 0.8;
         $routing['reasoning'] = 'Standard document query, no conversation context needed';
         
-        Log::info('ContextRouter: DOCUMENT query (default)', [
+        Log::debug('ContextRouter: DOCUMENT query (default)', [
             'query' => $query,
             'route' => 'documents_only'
         ]);
@@ -210,7 +210,7 @@ class ContextRouter
                 'reasoning' => "Query uses pronouns that may refer to entities from previous messages"
             ];
         }
-        
+
         return [
             'needs_context' => false,
             'confidence' => 0.0,

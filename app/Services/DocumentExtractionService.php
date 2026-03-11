@@ -222,8 +222,6 @@ class DocumentExtractionService
      */
     private function extractSpreadsheetText($content)
     {
-        Log::info('Attempting spreadsheet text extraction', ['content_length' => strlen($content)]);
-
         // PhpSpreadsheet operates on files, so we write to a temp file.
         $tmpFile = null;
 

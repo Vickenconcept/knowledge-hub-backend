@@ -64,7 +64,6 @@ class VectorStoreService
             
             Log::info('✅ Vectors stored in database', [
                 'driver' => $driver,
-                'total_vectors' => count($vectors),
                 'updated_count' => $updatedCount,
                 'org_id' => $orgId ?? $namespace,
             ]);
@@ -156,7 +155,7 @@ class VectorStoreService
                         });
                     }
                     
-                    Log::info('📊 Applying connector filter', [
+                    Log::debug('📊 Applying connector filter', [
                         'connector_ids' => $connectorIds,
                         'has_null' => $hasNull,
                         'non_null_ids' => $nonNullIds
@@ -166,7 +165,7 @@ class VectorStoreService
                 // Apply source scope filter (organization vs personal)
                 if (isset($filter['source_scope'])) {
                     $query->where('chunks.source_scope', $filter['source_scope']);
-                    Log::info('📊 Applying source scope filter', ['source_scope' => $filter['source_scope']]);
+                    Log::debug('📊 Applying source scope filter', ['source_scope' => $filter['source_scope']]);
                 } elseif (isset($filter['user_id'])) {
                     // For 'both' scope: include organization docs for all + personal docs for this user
                     // CRITICAL FIX: Organization documents should be accessible regardless of connector access
@@ -177,21 +176,21 @@ class VectorStoreService
                                    ->where('documents.user_id', $filter['user_id']);
                           });
                     });
-                    Log::info('📊 Applying mixed scope filter', ['user_id' => $filter['user_id']]);
+                    Log::debug('📊 Applying mixed scope filter', ['user_id' => $filter['user_id']]);
                 }
                 
                 // Apply workspace name filter
                 if (isset($filter['workspace_name'])) {
                     $workspaceNames = $filter['workspace_name']['$in'] ?? [$filter['workspace_name']];
                     $query->whereIn('chunks.workspace_name', $workspaceNames);
-                    Log::info('📊 Applying workspace name filter', ['workspace_names' => $workspaceNames]);
+                    Log::debug('📊 Applying workspace name filter', ['workspace_names' => $workspaceNames]);
                 }
             }
             
             // Get chunk count first for optimization decision
             $totalChunks = $query->count();
             
-            Log::info('📦 Retrieved chunks for similarity search', [
+            Log::debug('📦 Retrieved chunks for similarity search', [
                 'org_id' => $filterOrgId,
                 'total_chunks' => $totalChunks,
                 'filter' => $filter
@@ -208,12 +207,6 @@ class VectorStoreService
             $driver = DB::connection()->getDriverName();
             
             if ($totalChunks > $batchSize) {
-                Log::info('⚡ Large dataset detected, processing in batches', [
-                    'total_chunks' => $totalChunks,
-                    'batch_size' => $batchSize,
-                    'estimated_batches' => ceil($totalChunks / $batchSize)
-                ]);
-                
                 // Process in batches to prevent memory exhaustion
                 $processedCount = 0;
                 for ($offset = 0; $offset < $totalChunks; $offset += $batchSize) {
@@ -224,19 +217,11 @@ class VectorStoreService
                         $binaryData = $chunk->embedding;
                         
                         if ($driver === 'pgsql' && is_resource($binaryData)) {
-                            // PostgreSQL returns BYTEA as a stream resource
                             $binaryData = stream_get_contents($binaryData);
                         }
                         
-                        // Unpack binary to float array
                         $chunkVector = unpack('f*', $binaryData);
-                        
                         if (empty($chunkVector)) {
-                            Log::warning('⚠️ Failed to unpack embedding', [
-                                'chunk_id' => $chunk->id,
-                                'embedding_type' => gettype($chunk->embedding),
-                                'driver' => $driver
-                            ]);
                             continue;
                         }
                         
@@ -352,10 +337,6 @@ class VectorStoreService
                 ->whereIn('id', $ids)
                 ->update(['embedding' => null]);
             
-            Log::info('✅ Vectors deleted from MySQL', [
-                'chunk_ids' => $ids,
-                'deleted_count' => $deleted
-            ]);
             
             return [];
         } catch (\Exception $e) {

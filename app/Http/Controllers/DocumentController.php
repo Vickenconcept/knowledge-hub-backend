@@ -269,11 +269,6 @@ class DocumentController extends Controller
         $orgId = $request->user()->org_id;
         $documentIds = $request->input('document_ids');
         
-        Log::info('Bulk deleting documents', [
-            'count' => count($documentIds),
-            'user_id' => $request->user()->id,
-        ]);
-        
         $deletedCount = 0;
         $totalChunksDeleted = 0;
 
