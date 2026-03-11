@@ -164,23 +164,21 @@ class DocumentExtractionService
     }
 
     /**
-     * Create sanitized error text
+     * Create a simple, user-friendly error message instead of a long technical error.
      */
     private function createErrorText(\Exception $e, ?string $filename, ?string $mimeType): string
     {
-        $errorMessage = "Error extracting text from this file";
-        
-        if ($filename) {
-            $errorMessage .= " ({$filename})";
+        // Keep logs detailed but show users a short, clear message
+        $isPdf = $mimeType === 'application/pdf' || ($filename && str_ends_with(strtolower($filename), '.pdf'));
+
+        if ($isPdf) {
+            $message = 'Could not extract text from this PDF. ';
+            $message .= 'This often happens with slide decks, scanned documents, or image-only PDFs.';
+        } else {
+            $message = 'Could not extract text from this file.';
         }
-        
-        if ($mimeType) {
-            $errorMessage .= " [{$mimeType}]";
-        }
-        
-        $errorMessage .= ": " . $e->getMessage();
-        
-        return $this->sanitizeText($errorMessage);
+
+        return $this->sanitizeText($message);
     }
 
     private function extractPlainText($content)
@@ -226,10 +224,13 @@ class DocumentExtractionService
                     $tempPdfPath = sys_get_temp_dir() . '/' . uniqid('pdf_pdftotext_') . '.pdf';
                     file_put_contents($tempPdfPath, $content);
 
-                    // Set the path to pdftotext executable
-                    $pdftotextPath = 'C:\poppler\poppler-24.08.0\Library\bin\pdftotext.exe';
-
-                    $text = \Spatie\PdfToText\Pdf::getText($tempPdfPath, $pdftotextPath);
+                    // On Windows dev we may need an explicit pdftotext path; on Linux/Forge let Spatie auto-detect.
+                    if (PHP_OS_FAMILY === 'Windows') {
+                        $pdftotextPath = 'C:\poppler\poppler-24.08.0\Library\bin\pdftotext.exe';
+                        $text = \Spatie\PdfToText\Pdf::getText($tempPdfPath, $pdftotextPath);
+                    } else {
+                        $text = \Spatie\PdfToText\Pdf::getText($tempPdfPath);
+                    }
 
                     // Clean up temp file immediately
                     if (file_exists($tempPdfPath)) {
