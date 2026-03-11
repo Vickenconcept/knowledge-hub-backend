@@ -258,6 +258,9 @@ class AdminOrganizationController extends Controller
                 // Delete connectors for this org (their own cascades handle downstream data)
                 Connector::where('org_id', $organization->id)->delete();
 
+                // Delete users that belong to this org so their emails can be reused
+                User::where('org_id', $organization->id)->delete();
+
                 // Finally delete the organization itself
                 $organization->delete();
             });
