@@ -7,7 +7,6 @@ use App\Models\Organization;
 use App\Services\EmailService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
-use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Str;
 
@@ -68,19 +67,7 @@ class AuthController extends Controller
 
         $user = User::where('email', $validated['email'])->first();
 
-        Log::info('User lookup result', [
-            'email' => $validated['email'],
-            'password_length' => strlen($validated['password']),
-            'password_first_chars' => substr($validated['password'], 0, 3),
-            'user_found' => $user ? true : false,
-            'user_id' => $user?->id,
-        ]);
-
         if (!$user) {
-            Log::warning('Login failed - user not found', [
-                'email' => $validated['email'],
-            ]);
-            
             return response()->json([
                 'message' => 'Invalid credentials.',
                 'errors' => [
@@ -90,12 +77,6 @@ class AuthController extends Controller
         }
 
         if (!Hash::check($validated['password'], $user->password)) {
-            Log::warning('Login failed - password mismatch', [
-                'email' => $validated['email'],
-                'user_id' => $user->id,
-                'password_provided_length' => strlen($validated['password']),
-                'password_hash_prefix' => substr($user->password, 0, 10),
-            ]);
             
             return response()->json([
                 'message' => 'Invalid credentials.',
@@ -106,12 +87,6 @@ class AuthController extends Controller
         }
 
         $token = $user->createToken('api-token')->plainTextToken;
-
-        Log::info('Login successful', [
-            'user_id' => $user->id,
-            'email' => $user->email,
-            'token_length' => strlen($token),
-        ]);
 
         return response()->json([
             'user' => $user,
@@ -137,11 +112,6 @@ class AuthController extends Controller
             // Check if Authorization header is present
             $authHeader = $request->header('Authorization');
             if (!$authHeader || !str_starts_with($authHeader, 'Bearer ')) {
-                Log::warning('Token validation failed - no authorization header', [
-                    'ip' => $request->ip(),
-                    'user_agent' => $request->userAgent()
-                ]);
-                
                 return response()->json([
                     'success' => false,
                     'valid' => false,
@@ -156,11 +126,6 @@ class AuthController extends Controller
             $accessToken = \Laravel\Sanctum\PersonalAccessToken::findToken($token);
             
             if (!$accessToken) {
-                Log::warning('Token validation failed - token not found', [
-                    'ip' => $request->ip(),
-                    'user_agent' => $request->userAgent()
-                ]);
-                
                 return response()->json([
                     'success' => false,
                     'valid' => false,
@@ -181,11 +146,6 @@ class AuthController extends Controller
             $user = $accessToken->tokenable;
             
             if (!$user) {
-                Log::warning('Token validation failed - user not found', [
-                    'token_id' => $accessToken->id,
-                    'ip' => $request->ip()
-                ]);
-                
                 return response()->json([
                     'success' => false,
                     'valid' => false,
