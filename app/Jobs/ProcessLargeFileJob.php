@@ -133,25 +133,24 @@ class ProcessLargeFileJob implements ShouldQueue
                 Log::info('Large file document created', ['name' => $this->fileData['name']]);
             }
 
-            // Create chunks using the shared, structure-aware chunking service
-            $chunker = app(\App\Services\ChunkingService::class);
-            $splits = $chunker->splitWithOverlap($text, 2000, 200);
+            // Create chunks
+            $textChunks = $extractor->chunkText($text);
             Log::info('Creating chunks for large file', [
                 'name' => $this->fileData['name'],
-                'chunk_count' => count($splits)
+                'chunk_count' => count($textChunks)
             ]);
 
             $createdChunks = [];
-            foreach ($splits as $index => $part) {
+            foreach ($textChunks as $index => $chunkText) {
                 $chunk = Chunk::create([
                     'id' => (string) Str::uuid(),
                     'org_id' => $this->orgId,
                     'document_id' => $document->id,
                     'chunk_index' => $index,
-                    'text' => $part['text'],
-                    'char_start' => $part['char_start'],
-                    'char_end' => $part['char_end'],
-                    'token_count' => str_word_count($part['text']),
+                    'text' => $chunkText,
+                    'char_start' => $index * 2000,
+                    'char_end' => ($index + 1) * 2000,
+                    'token_count' => str_word_count($chunkText),
                 ]);
                 $createdChunks[] = $chunk;
             }
@@ -166,11 +165,11 @@ class ProcessLargeFileJob implements ShouldQueue
 
             Log::info('✅ Large file processed successfully', [
                 'name' => $this->fileData['name'],
-                'chunks_created' => count($splits)
+                'chunks_created' => count($textChunks)
             ]);
             
             // Update the parent IngestJob stats
-            $this->updateIngestJobStats(count($splits), 0);
+            $this->updateIngestJobStats(count($textChunks), 0);
 
         } catch (\Exception $e) {
             Log::error('❌ Error processing large file', [

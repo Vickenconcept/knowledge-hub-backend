@@ -248,39 +248,14 @@ class IngestConnectorJob implements ShouldQueue
                 break;
             }
 
-            // Check if document already has chunks
-            $chunksQuery = \App\Models\Chunk::where('document_id', $document->id);
-            $existingChunkCount = $chunksQuery->count();
+            // Check if document already has chunks - skip if already processed
+            $existingChunkCount = \App\Models\Chunk::where('document_id', $document->id)->count();
             if ($existingChunkCount > 0) {
-                // See if any of those chunks are missing embeddings
-                $missingEmbeddingCount = (clone $chunksQuery)->whereNull('embedding')->count();
-
-                if ($missingEmbeddingCount === 0) {
-                    // All chunks already have embeddings – safe to skip
-                    Log::info("⏭️ Document already processed with embeddings, skipping: " . $document->title, [
-                        'document_id' => $document->id,
-                        'existing_chunks' => $existingChunkCount
-                    ]);
-                    $skippedFiles++;
-                    $processedFiles++;
-                    continue;
-                }
-
-                // Backfill embeddings for existing chunks that are missing them
-                Log::info("🔁 Backfilling embeddings for existing chunks without embeddings", [
+                Log::info("⏭️ Document already processed, skipping: " . $document->title, [
                     'document_id' => $document->id,
-                    'title' => $document->title,
-                    'existing_chunks' => $existingChunkCount,
-                    'missing_embeddings' => $missingEmbeddingCount
+                    'existing_chunks' => $existingChunkCount
                 ]);
-
-                $chunksNeedingEmbeddings = $chunksQuery->whereNull('embedding')->get();
-                if ($chunksNeedingEmbeddings->isNotEmpty()) {
-                    $this->generateAndUploadEmbeddings($chunksNeedingEmbeddings->all(), $job);
-                    $chunks += $chunksNeedingEmbeddings->count();
-                }
-
-                $docs++;
+                $skippedFiles++;
                 $processedFiles++;
                 continue;
             }
