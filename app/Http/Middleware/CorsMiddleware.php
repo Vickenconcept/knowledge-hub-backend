@@ -26,6 +26,7 @@ class CorsMiddleware
             'http://localhost:4173', // Vite preview
             'http://127.0.0.1:4173',
             'https://knowledge-hub-frontend.vercel.app',
+            'https://api.hub.phanrise.com',
             'https://hub.phanrise.com'
         ];
         
