@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Core\Connectors;
 
 use App\Models\Connector;
+use App\Models\Chunk;
 use App\Models\Document;
 use App\Services\Core\FileUploadService;
 use App\Services\Core\DocumentExtractionService;
@@ -601,24 +602,47 @@ class ManualUploadController extends BaseConnectorController
     public function getUploadHistory(Request $request)
     {
         $orgId = $request->user()->org_id;
-        
-        $connector = Connector::where('org_id', $orgId)
-            ->where('type', 'manual_upload')
-            ->first();
+        $userId = $request->user()->id;
 
-        if (!$connector) {
-            return response()->json([
-                'uploads' => [],
-                'message' => 'No manual upload connector found'
-            ]);
-        }
-
-        $documents = Document::where('connector_id', $connector->id)
+        // Mirror scope visibility logic used by DocumentController so Sources and Generate stay consistent.
+        $documents = Document::where('org_id', $orgId)
+            ->whereHas('connector', function ($q) {
+                $q->where('type', 'manual_upload');
+            })
+            ->where(function ($query) use ($userId) {
+                $query->where(function ($q) use ($userId) {
+                    $q->where('user_id', $userId)
+                      ->where('source_scope', 'personal');
+                })
+                ->orWhere(function ($q) {
+                    $q->where('source_scope', 'organization');
+                });
+            })
             ->orderBy('created_at', 'desc')
             ->paginate(20);
 
+        $docIds = collect($documents->items())->pluck('id')->values();
+        $chunkCounts = Chunk::whereIn('document_id', $docIds)
+            ->selectRaw('document_id, COUNT(*) as chunks_count')
+            ->groupBy('document_id')
+            ->pluck('chunks_count', 'document_id');
+
+        $uploads = collect($documents->items())->map(function (Document $doc) use ($chunkCounts) {
+            return [
+                'id' => $doc->id,
+                'title' => $doc->title,
+                'doc_type' => $doc->doc_type,
+                'tags' => $doc->tags ?? [],
+                'chunks_count' => (int) ($chunkCounts[$doc->id] ?? 0),
+                'source_scope' => $doc->source_scope,
+                'workspace_name' => $doc->workspace_name,
+                'created_at' => $doc->created_at,
+                'updated_at' => $doc->updated_at,
+            ];
+        })->values();
+
         return response()->json([
-            'uploads' => $documents->items(),
+            'uploads' => $uploads,
             'pagination' => [
                 'current_page' => $documents->currentPage(),
                 'last_page' => $documents->lastPage(),
