@@ -3,14 +3,14 @@
 namespace App\Http\Controllers\Addition\V1;
 
 use App\Http\Controllers\Addition\Controller;
-use App\Services\Addition\V1\AdditionV1Service;
+use App\Services\Addition\V1\ContentStudioV1Service;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
 
-class AdditionV1Controller extends Controller
+class ContentStudioV1Controller extends Controller
 {
-    public function __construct(private readonly AdditionV1Service $service)
+    public function __construct(private readonly ContentStudioV1Service $service)
     {
     }
 
@@ -38,8 +38,22 @@ class AdditionV1Controller extends Controller
             'search_scope' => 'nullable|string|in:organization,personal,both',
         ]);
 
-        $result = $this->service->contentGenerate($data, (string) $request->user()->org_id, (int) $request->user()->id);
-        return $this->ok($result, $start);
+        try {
+            $result = $this->service->contentGenerate($data, (string) $request->user()->org_id, (int) $request->user()->id);
+            return $this->ok($result, $start);
+        } catch (\Throwable $e) {
+            \Log::error('Addition v1 content generation failed', [
+                'user_id' => $request->user()?->id,
+                'org_id' => $request->user()?->org_id,
+                'error' => $e->getMessage(),
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'error' => 'Content generation failed',
+                'message' => 'AI generation is currently unavailable. Check OPENAI_API_KEY / OPENAI_CHAT_MODEL and try again.',
+            ], 503);
+        }
     }
 
     public function courseCoach(Request $request): JsonResponse
