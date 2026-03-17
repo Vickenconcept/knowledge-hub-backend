@@ -3,9 +3,12 @@
 namespace App\Services\Addition\V1;
 
 use App\Models\Chunk;
+use App\Models\ContentStudioGeneration;
+use App\Models\ContentStudioGenerationItem;
 use App\Models\Document;
 use App\Services\Core\RAGService;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
 class ContentStudioV1Service
@@ -56,9 +59,142 @@ class ContentStudioV1Service
             $outputs = $this->buildFallbackOutputs($format, $keywords);
         }
 
+        $outputs = $this->attachGeneratedImages($outputs, $input);
+        $generation = $this->storeGenerationRun($orgId, $userId, $input, $docs, $outputs);
+
         return [
             'outputs' => $outputs,
             'sources' => $this->mapSources($docs),
+            'generation' => [
+                'id' => $generation->id,
+                'title' => $generation->title,
+                'outputs_count' => $generation->outputs_count,
+                'images_count' => $generation->images_count,
+                'created_at' => $generation->created_at,
+            ],
+        ];
+    }
+
+    public function listContentRuns(string $orgId, int $userId, int $perPage = 20): array
+    {
+        $page = ContentStudioGeneration::where('org_id', $orgId)
+            ->where('user_id', $userId)
+            ->orderByDesc('created_at')
+            ->paginate(max(1, min(100, $perPage)));
+
+        return [
+            'data' => collect($page->items())->map(function (ContentStudioGeneration $run) {
+                return [
+                    'id' => $run->id,
+                    'title' => $run->title,
+                    'query' => $run->query,
+                    'format' => $run->format,
+                    'tone' => $run->tone,
+                    'channel' => $run->channel,
+                    'outputs_count' => (int) $run->outputs_count,
+                    'images_count' => (int) $run->images_count,
+                    'status' => $run->status,
+                    'created_at' => $run->created_at,
+                ];
+            })->values()->all(),
+            'pagination' => [
+                'current_page' => $page->currentPage(),
+                'last_page' => $page->lastPage(),
+                'per_page' => $page->perPage(),
+                'total' => $page->total(),
+            ],
+        ];
+    }
+
+    public function getContentRun(string $runId, string $orgId, int $userId): ?array
+    {
+        $run = ContentStudioGeneration::where('id', $runId)
+            ->where('org_id', $orgId)
+            ->where('user_id', $userId)
+            ->first();
+
+        if (!$run) {
+            return null;
+        }
+
+        $items = ContentStudioGenerationItem::where('generation_id', $run->id)
+            ->orderBy('sort_order')
+            ->get();
+
+        return [
+            'run' => [
+                'id' => $run->id,
+                'title' => $run->title,
+                'query' => $run->query,
+                'format' => $run->format,
+                'tone' => $run->tone,
+                'channel' => $run->channel,
+                'max_outputs' => (int) $run->max_outputs,
+                'outputs_count' => (int) $run->outputs_count,
+                'images_count' => (int) $run->images_count,
+                'source_document_ids' => $run->source_document_ids ?? [],
+                'source_tags' => $run->source_tags ?? [],
+                'created_at' => $run->created_at,
+            ],
+            'items' => $items->map(function (ContentStudioGenerationItem $item) {
+                return [
+                    'id' => $item->id,
+                    'type' => $item->item_type,
+                    'title' => $item->title,
+                    'content' => $item->content,
+                    'cta' => $item->cta,
+                    'image_url' => $item->image_url,
+                    'image_prompt' => $item->image_prompt,
+                    'source_document_ids' => $item->source_document_ids ?? [],
+                ];
+            })->values()->all(),
+        ];
+    }
+
+    public function getOverview(string $orgId, int $userId): array
+    {
+        $base = ContentStudioGeneration::where('org_id', $orgId)->where('user_id', $userId);
+        $totalRuns = (clone $base)->count();
+        $totalOutputs = (int) ((clone $base)->sum('outputs_count') ?? 0);
+        $totalImages = (int) ((clone $base)->sum('images_count') ?? 0);
+        $lastRun = (clone $base)->orderByDesc('created_at')->first();
+
+        $recentRuns = (clone $base)
+            ->orderByDesc('created_at')
+            ->limit(5)
+            ->get()
+            ->map(function (ContentStudioGeneration $run) {
+                return [
+                    'id' => $run->id,
+                    'title' => $run->title,
+                    'format' => $run->format,
+                    'outputs_count' => (int) $run->outputs_count,
+                    'images_count' => (int) $run->images_count,
+                    'created_at' => $run->created_at,
+                ];
+            })->values()->all();
+
+        $topTypes = ContentStudioGenerationItem::where('org_id', $orgId)
+            ->where('user_id', $userId)
+            ->selectRaw('item_type, COUNT(*) as count')
+            ->groupBy('item_type')
+            ->orderByDesc('count')
+            ->limit(6)
+            ->get()
+            ->map(fn ($row) => [
+                'type' => $row->item_type,
+                'count' => (int) $row->count,
+            ])->values()->all();
+
+        return [
+            'totals' => [
+                'runs' => $totalRuns,
+                'outputs' => $totalOutputs,
+                'images' => $totalImages,
+                'last_generated_at' => $lastRun?->created_at,
+            ],
+            'recent_runs' => $recentRuns,
+            'top_output_types' => $topTypes,
         ];
     }
 
@@ -457,5 +593,132 @@ class ContentStudioV1Service
         }
 
         return $outputs;
+    }
+
+    private function attachGeneratedImages(array $outputs, array $input): array
+    {
+        $enabled = filter_var((string) env('CONTENT_STUDIO_ENABLE_IMAGES', 'true'), FILTER_VALIDATE_BOOLEAN);
+        if (!$enabled || empty($outputs)) {
+            return $outputs;
+        }
+
+        $openAiKey = config('services.openai.key', env('OPENAI_API_KEY'));
+        if (empty($openAiKey)) {
+            return $outputs;
+        }
+
+        $limit = max(0, min(8, (int) env('CONTENT_STUDIO_IMAGE_LIMIT', 3)));
+        if ($limit === 0) {
+            return $outputs;
+        }
+
+        $imageModel = (string) env('OPENAI_IMAGE_MODEL', 'gpt-image-1');
+        $generated = 0;
+
+        foreach ($outputs as $idx => $output) {
+            if ($generated >= $limit) {
+                break;
+            }
+
+            if (!is_array($output)) {
+                continue;
+            }
+
+            $prompt = $this->buildImagePrompt($output, $input);
+            try {
+                $resp = Http::withToken($openAiKey)
+                    ->timeout(120)
+                    ->retry(2, 1500)
+                    ->post('https://api.openai.com/v1/images/generations', [
+                        'model' => $imageModel,
+                        'prompt' => $prompt,
+                        'size' => '1024x1024',
+                    ]);
+
+                if (!$resp->successful()) {
+                    Log::warning('ContentStudio image generation failed', [
+                        'status' => $resp->status(),
+                        'body' => mb_substr($resp->body(), 0, 500),
+                    ]);
+                    continue;
+                }
+
+                $json = $resp->json();
+                $b64 = $json['data'][0]['b64_json'] ?? null;
+                $url = $json['data'][0]['url'] ?? null;
+
+                if (is_string($b64) && $b64 !== '') {
+                    $outputs[$idx]['image_url'] = 'data:image/png;base64,' . $b64;
+                    $outputs[$idx]['image_prompt'] = $prompt;
+                    $generated++;
+                    continue;
+                }
+
+                if (is_string($url) && $url !== '') {
+                    $outputs[$idx]['image_url'] = $url;
+                    $outputs[$idx]['image_prompt'] = $prompt;
+                    $generated++;
+                }
+            } catch (\Throwable $e) {
+                Log::warning('ContentStudio image generation exception', [
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+
+        return $outputs;
+    }
+
+    private function buildImagePrompt(array $output, array $input): string
+    {
+        $tone = (string) ($input['tone'] ?? 'direct');
+        $channel = (string) ($input['channel'] ?? 'mixed');
+        $title = mb_substr((string) ($output['title'] ?? ''), 0, 120);
+        $content = mb_substr((string) ($output['content'] ?? ''), 0, 500);
+
+        return "Create a high-quality marketing visual for this content asset. Tone: {$tone}. Channel: {$channel}. "
+            . "Title: {$title}. Core message: {$content}. No text overlays, modern composition, brand-safe, photoreal or premium illustration style.";
+    }
+
+    private function storeGenerationRun(string $orgId, int $userId, array $input, Collection $docs, array $outputs): ContentStudioGeneration
+    {
+        $query = (string) ($input['query'] ?? 'Generated campaign assets');
+        $generation = ContentStudioGeneration::create([
+            'org_id' => $orgId,
+            'user_id' => $userId,
+            'title' => mb_substr($query, 0, 120),
+            'query' => $query,
+            'format' => (string) ($input['format'] ?? 'campaign_pack'),
+            'tone' => (string) ($input['tone'] ?? 'direct'),
+            'channel' => (string) ($input['channel'] ?? 'mixed'),
+            'max_outputs' => (int) ($input['max_outputs'] ?? 12),
+            'source_document_ids' => $docs->pluck('id')->values()->all(),
+            'source_tags' => $this->extractKeywords($this->collectChunkText($docs->pluck('id')->all(), 30)),
+            'outputs_count' => count($outputs),
+            'images_count' => count(array_filter($outputs, fn ($o) => !empty($o['image_url']))),
+            'status' => 'completed',
+            'metadata' => [
+                'search_scope' => $input['search_scope'] ?? 'both',
+            ],
+        ]);
+
+        foreach ($outputs as $index => $output) {
+            ContentStudioGenerationItem::create([
+                'generation_id' => $generation->id,
+                'org_id' => $orgId,
+                'user_id' => $userId,
+                'sort_order' => $index,
+                'item_type' => (string) ($output['type'] ?? 'content'),
+                'title' => (string) ($output['title'] ?? 'Generated Asset'),
+                'content' => (string) ($output['content'] ?? ''),
+                'cta' => isset($output['cta']) ? (string) $output['cta'] : null,
+                'image_url' => isset($output['image_url']) ? (string) $output['image_url'] : null,
+                'image_prompt' => isset($output['image_prompt']) ? (string) $output['image_prompt'] : null,
+                'source_document_ids' => $output['source_document_ids'] ?? [],
+                'metadata' => null,
+            ]);
+        }
+
+        return $generation;
     }
 }

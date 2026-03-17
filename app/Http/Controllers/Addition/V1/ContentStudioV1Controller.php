@@ -72,6 +72,40 @@ class ContentStudioV1Controller extends Controller
         return $this->ok($result, $start);
     }
 
+    public function contentOverview(Request $request): JsonResponse
+    {
+        $start = microtime(true);
+        $result = $this->service->getOverview((string) $request->user()->org_id, (int) $request->user()->id);
+        return $this->ok($result, $start);
+    }
+
+    public function contentRuns(Request $request): JsonResponse
+    {
+        $start = microtime(true);
+        $data = $request->validate([
+            'per_page' => 'nullable|integer|min:1|max:100',
+        ]);
+
+        $perPage = (int) ($data['per_page'] ?? 20);
+        $result = $this->service->listContentRuns((string) $request->user()->org_id, (int) $request->user()->id, $perPage);
+        return $this->ok($result, $start);
+    }
+
+    public function contentRunShow(Request $request, string $id): JsonResponse
+    {
+        $start = microtime(true);
+        $result = $this->service->getContentRun($id, (string) $request->user()->org_id, (int) $request->user()->id);
+
+        if (!$result) {
+            return response()->json([
+                'success' => false,
+                'error' => 'Run not found',
+            ], 404);
+        }
+
+        return $this->ok($result, $start);
+    }
+
     public function pdfChat(Request $request): JsonResponse
     {
         $start = microtime(true);
