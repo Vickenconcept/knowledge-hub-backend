@@ -60,7 +60,7 @@ class DocumentController extends Controller
         })->filter()->values();
             
         // Format response
-        $formatted = $docs->map(function($doc) {
+        $formatted = $docs->map(function($doc) use ($chunkCounts) {
             $connector = $doc->connector;
             $sourceType = 'Unknown';
             
