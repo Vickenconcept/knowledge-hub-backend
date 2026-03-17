@@ -141,9 +141,7 @@ class BillingController extends Controller
         }
     }
     
-    /**
-     * Get organization's current tier and billing settings
-     */
+    
     public function getOrganizationBilling(Request $request)
     {
         try {
