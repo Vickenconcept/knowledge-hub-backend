@@ -18,9 +18,9 @@ class DocumentController extends Controller
     {
         $orgId = $request->user()->org_id;
         $userId = $request->user()->id;
-        
-        // Smart filtering: Show user's personal documents + organization documents
-        $docs = Document::where('org_id', $orgId)
+
+        // Shared scope filter for personal + organization accessible docs.
+        $baseQuery = Document::where('org_id', $orgId)
             ->where(function($query) use ($userId) {
                 $query->where(function($q) use ($userId) {
                     // User's personal documents (uploaded by this user with personal scope)
@@ -35,14 +35,28 @@ class DocumentController extends Controller
             ->where(function($query) {
                 $query->where('doc_type', '!=', 'guide')
                       ->orWhereNull('doc_type');
-            })
-            ->with('connector')
-            ->withCount('chunks')
+            });
+
+        // Page by lightweight IDs first to avoid sorting wide rows (metadata/summary/text fields).
+        $docIdsPage = (clone $baseQuery)
+            ->select('id')
             ->orderByDesc('created_at')
             ->paginate(50);
+
+        $orderedIds = collect($docIdsPage->items())->pluck('id')->values();
+
+        $docsById = Document::whereIn('id', $orderedIds)
+            ->with('connector')
+            ->withCount('chunks')
+            ->get()
+            ->keyBy('id');
+
+        $docs = $orderedIds->map(function ($id) use ($docsById) {
+            return $docsById->get($id);
+        })->filter()->values();
             
         // Format response
-        $formatted = $docs->getCollection()->map(function($doc) {
+        $formatted = $docs->map(function($doc) {
             $connector = $doc->connector;
             $sourceType = 'Unknown';
             
@@ -93,12 +107,12 @@ class DocumentController extends Controller
             'success' => true,
             'data' => $formatted,
             'pagination' => [
-                'current_page' => $docs->currentPage(),
-                'last_page' => $docs->lastPage(),
-                'per_page' => $docs->perPage(),
-                'total' => $docs->total(),
-                'from' => $docs->firstItem(),
-                'to' => $docs->lastItem(),
+                'current_page' => $docIdsPage->currentPage(),
+                'last_page' => $docIdsPage->lastPage(),
+                'per_page' => $docIdsPage->perPage(),
+                'total' => $docIdsPage->total(),
+                'from' => $docIdsPage->firstItem(),
+                'to' => $docIdsPage->lastItem(),
             ]
         ]);
     }
