@@ -117,6 +117,19 @@ class ChatController extends Controller
         ]);
 
         try {
+            $fastEmailCountResponse = $this->tryHandleEmailCountQuery(
+                $queryText,
+                $orgId,
+                $user->id,
+                $conversation,
+                $connectorIds,
+                $searchScope
+            );
+
+            if ($fastEmailCountResponse !== null) {
+                return response()->json($fastEmailCountResponse);
+            }
+
             // 1. INTELLIGENT CONTEXT ROUTING
             // Get conversation history for routing decision
             $conversationHistory = \App\Services\Core\ConversationMemoryService::getConversationContext($conversation->id, 10);
@@ -1242,6 +1255,149 @@ class ChatController extends Controller
         }
         
         return false;
+    }
+
+    /**
+     * Fast-path for deterministic "count emails" queries against a specific document.
+     * This bypasses embedding/vector/LLM to reduce latency for large CSV/text uploads.
+     */
+    private function tryHandleEmailCountQuery(
+        string $queryText,
+        string $orgId,
+        int $userId,
+        Conversation $conversation,
+        ?array $connectorIds,
+        string $searchScope
+    ): ?array {
+        $lower = mb_strtolower($queryText);
+
+        $isCountIntent = preg_match('/\b(how many|count|number of|total)\b/i', $queryText) === 1;
+        $isEmailIntent = preg_match('/\bemail(s| address(?:es)?)?\b/i', $queryText) === 1;
+        if (!$isCountIntent || !$isEmailIntent) {
+            return null;
+        }
+
+        $docHint = $this->extractDocumentHintFromQuery($queryText);
+        if (empty($docHint)) {
+            return null;
+        }
+
+        $documentQuery = Document::where('org_id', $orgId)
+            ->where(function ($q) use ($userId) {
+                $q->where('source_scope', 'organization')
+                  ->orWhere(function ($qq) use ($userId) {
+                      $qq->where('source_scope', 'personal')
+                         ->where('user_id', $userId);
+                  });
+            })
+            ->where(function ($q) use ($docHint) {
+                $q->where('title', 'like', '%' . $docHint . '%')
+                  ->orWhere('id', $docHint);
+            });
+
+        if (!empty($connectorIds)) {
+            $documentQuery->whereIn('connector_id', $connectorIds);
+        }
+
+        if ($searchScope === 'organization') {
+            $documentQuery->where('source_scope', 'organization');
+        } elseif ($searchScope === 'personal') {
+            $documentQuery->where('source_scope', 'personal')->where('user_id', $userId);
+        }
+
+        $document = $documentQuery->orderByDesc('created_at')->first();
+        if (!$document) {
+            return null;
+        }
+
+        $totalMatches = 0;
+        $uniqueEmails = [];
+        $emailPattern = '/[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}/i';
+
+        $chunkCursor = Chunk::where('document_id', $document->id)->select('text')->cursor();
+        foreach ($chunkCursor as $chunk) {
+            if (empty($chunk->text)) {
+                continue;
+            }
+
+            if (preg_match_all($emailPattern, $chunk->text, $matches) === false) {
+                continue;
+            }
+
+            if (!empty($matches[0])) {
+                $totalMatches += count($matches[0]);
+                foreach ($matches[0] as $email) {
+                    $uniqueEmails[mb_strtolower(trim($email))] = true;
+                }
+            }
+        }
+
+        $uniqueCount = count($uniqueEmails);
+        $answer = "I found {$uniqueCount} unique email addresses in '{$document->title}'. ";
+        $answer .= "Total email occurrences across the document text: {$totalMatches}.";
+
+        $sources = [[
+            'document_id' => $document->id,
+            'title' => $document->title,
+            'url' => $document->s3_path ?: $document->source_url,
+            'excerpt' => 'Deterministic count from document chunks (regex-based email extraction).',
+            'score' => 1.0,
+            'type' => 'Manual upload',
+            'doc_type' => $document->doc_type,
+            'chunk_count' => Chunk::where('document_id', $document->id)->count(),
+            'workspace_info' => [
+                'workspace_name' => 'Manual Upload',
+                'workspace_scope' => $document->source_scope,
+                'workspace_icon' => $document->source_scope === 'personal' ? '👤' : '🏢',
+                'workspace_label' => $document->source_scope === 'personal' ? 'Personal' : 'Organization',
+            ],
+        ]];
+
+        Message::create([
+            'conversation_id' => $conversation->id,
+            'role' => 'assistant',
+            'content' => $answer,
+            'sources' => $sources,
+        ]);
+
+        $conversation->update(['last_message_at' => now()]);
+
+        Log::info('⚡ Fast email count path used', [
+            'conversation_id' => $conversation->id,
+            'document_id' => $document->id,
+            'unique_emails' => $uniqueCount,
+            'total_occurrences' => $totalMatches,
+        ]);
+
+        return [
+            'answer' => $answer,
+            'sources' => $sources,
+            'result_count' => 1,
+            'query' => $queryText,
+            'conversation_id' => $conversation->id,
+            'route_type' => 'fast_email_count',
+            'stats' => [
+                'unique_emails' => $uniqueCount,
+                'total_occurrences' => $totalMatches,
+            ],
+        ];
+    }
+
+    /**
+     * Try to extract a document hint (filename/id) from natural language query.
+     */
+    private function extractDocumentHintFromQuery(string $queryText): ?string
+    {
+        if (preg_match('/([a-zA-Z0-9._\-]+\.(csv|txt|tsv|json|md|log))/i', $queryText, $m) === 1) {
+            return $m[1];
+        }
+
+        if (preg_match('/\bdocument\s+([^\?]+)$/i', $queryText, $m) === 1) {
+            $hint = trim($m[1], " \t\n\r\0\x0B\"'`.,");
+            return $hint !== '' ? $hint : null;
+        }
+
+        return null;
     }
 
     /**
