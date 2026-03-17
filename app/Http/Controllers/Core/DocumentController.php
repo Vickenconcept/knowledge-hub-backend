@@ -47,9 +47,13 @@ class DocumentController extends Controller
 
         $docsById = Document::whereIn('id', $orderedIds)
             ->with('connector')
-            ->withCount('chunks')
             ->get()
             ->keyBy('id');
+
+        $chunkCounts = Chunk::whereIn('document_id', $orderedIds)
+            ->selectRaw('document_id, COUNT(*) as chunks_count')
+            ->groupBy('document_id')
+            ->pluck('chunks_count', 'document_id');
 
         $docs = $orderedIds->map(function ($id) use ($docsById) {
             return $docsById->get($id);
@@ -90,7 +94,7 @@ class DocumentController extends Controller
                 'tags' => $doc->tags ?? [],
                 'metadata' => $doc->metadata ?? null,
                 'size' => $doc->size,
-                'chunks_count' => $doc->chunks_count,
+                'chunks_count' => (int) ($chunkCounts[$doc->id] ?? 0),
                 'created_at' => $doc->created_at,
                 'fetched_at' => $doc->fetched_at,
                 'scope' => $doc->source_scope ?? 'unknown',
