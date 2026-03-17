@@ -4,7 +4,7 @@ namespace App\Console\Commands;
 
 use Illuminate\Console\Command;
 use App\Models\Connector;
-use App\Jobs\IngestConnectorJob;
+use App\Jobs\Core\IngestConnectorJob;
 
 class TestSync extends Command
 {

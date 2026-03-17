@@ -2,7 +2,7 @@
 
 namespace App\Console\Commands;
 
-use App\Jobs\IngestConnectorJob;
+use App\Jobs\Core\IngestConnectorJob;
 use App\Models\Connector;
 use Illuminate\Console\Command;
 

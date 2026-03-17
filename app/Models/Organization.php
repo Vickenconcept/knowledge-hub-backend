@@ -31,7 +31,7 @@ class Organization extends Model
 
         static::created(function ($model) {
             // Auto-assign new organization to Free tier
-            \App\Services\SubscriptionService::assignFreeTier($model->id);
+            \App\Services\Core\SubscriptionService::assignFreeTier($model->id);
         });
     }
 

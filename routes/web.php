@@ -1,13 +1,13 @@
 <?php
 
-use App\Http\Controllers\AuthController;
-use App\Http\Controllers\ConnectorController;
-use App\Http\Controllers\Connectors\DropboxController;
-use App\Http\Controllers\Connectors\GoogleDriveController;
-use App\Http\Controllers\Connectors\SlackController;
-use App\Http\Controllers\Connectors\NotionController;
-use App\Http\Controllers\PasswordResetController;
-use App\Http\Controllers\ProfileController;
+use App\Http\Controllers\Core\AuthController;
+use App\Http\Controllers\Core\ConnectorController;
+use App\Http\Controllers\Core\Connectors\DropboxController;
+use App\Http\Controllers\Core\Connectors\GoogleDriveController;
+use App\Http\Controllers\Core\Connectors\SlackController;
+use App\Http\Controllers\Core\Connectors\NotionController;
+use App\Http\Controllers\Core\PasswordResetController;
+use App\Http\Controllers\Core\ProfileController;
 use Illuminate\Support\Facades\Route;
 
 // Route::get('/', function () {

@@ -6,7 +6,7 @@ use Illuminate\Database\Seeder;
 use App\Models\Document;
 use App\Models\Chunk;
 use App\Models\Organization;
-use App\Services\EmbeddingService;
+use App\Services\Core\EmbeddingService;
 use Illuminate\Support\Str;
 use Illuminate\Support\Facades\Log;
 

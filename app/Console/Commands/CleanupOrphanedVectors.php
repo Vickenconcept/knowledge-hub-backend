@@ -4,7 +4,7 @@ namespace App\Console\Commands;
 
 use App\Models\Chunk;
 use App\Models\Connector;
-use App\Services\VectorStoreService;
+use App\Services\Core\VectorStoreService;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Log;
 
