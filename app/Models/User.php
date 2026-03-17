@@ -24,6 +24,7 @@ class User extends Authenticatable
         'password',
         'org_id',
         'role',
+        'registered_from',
         'default_response_style',
         'ai_preferences',
     ];

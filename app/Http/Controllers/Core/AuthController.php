@@ -18,6 +18,7 @@ class AuthController extends Controller
             'name' => 'required|string|max:255',
             'email' => 'required|string|email|max:255|unique:users',
             'password' => 'required|string|min:8|confirmed',
+            'registered_from' => 'nullable|string|max:100',
         ]);
 
         if ($validator->fails()) {
@@ -32,6 +33,7 @@ class AuthController extends Controller
             'name' => $request->name,
             'email' => $request->email,
             'role' => 'admin',
+            'registered_from' => $this->resolveRegistrationSource($request, 'core_web'),
             'password' => Hash::make($request->password),
         ]);
 
@@ -205,5 +207,22 @@ class AuthController extends Controller
                 'message' => 'Failed to refresh token'
             ], 500);
         }
+    }
+
+    private function resolveRegistrationSource(Request $request, string $fallback): string
+    {
+        $candidate = $request->input('registered_from')
+            ?? $request->header('X-Client-App')
+            ?? $fallback;
+
+        $normalized = strtolower((string) $candidate);
+        $normalized = preg_replace('/[^a-z0-9_\-.]/', '_', $normalized) ?? $fallback;
+        $normalized = trim($normalized, '_-.');
+
+        if ($normalized === '') {
+            return $fallback;
+        }
+
+        return mb_substr($normalized, 0, 100);
     }
 }

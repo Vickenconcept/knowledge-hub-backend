@@ -177,6 +177,7 @@ Route::middleware('auth:sanctum')->group(function () {
 
         // Admin
         Route::get('admin/stats', [AdminController::class, 'stats']);
+        Route::get('admin/registration-sources', [AdminController::class, 'registrationSources']);
 
         // Admin: Organization Management
         Route::get('admin/organizations', [AdminOrganizationController::class, 'index']);
@@ -255,3 +256,5 @@ Route::middleware('auth:sanctum')->group(function () {
             return response()->json(['jobs' => $jobs, 'count' => $jobs->count()]);
         });
 });
+
+require __DIR__ . '/addition.php';

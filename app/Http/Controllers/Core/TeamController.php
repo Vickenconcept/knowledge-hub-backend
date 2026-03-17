@@ -108,6 +108,7 @@ class TeamController extends Controller
                 'password' => Hash::make($tempPassword),
                 'org_id' => $orgId,
                 'role' => $validated['role'] ?? 'user',
+                'registered_from' => 'team_invite',
             ]);
             
             // Send invitation email if requested

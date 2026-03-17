@@ -49,6 +49,30 @@ class AdminController extends Controller
             'chunk_count' => $chunkCount,
         ]);
     }
+
+    public function registrationSources(Request $request)
+    {
+        $user = $request->user();
+        $isSuperAdmin = $user && $user->role === 'super_admin';
+        $orgId = $user?->org_id;
+
+        $query = User::query();
+        if (!$isSuperAdmin && $orgId) {
+            $query->where('org_id', $orgId);
+        }
+
+        $sources = $query
+            ->selectRaw("COALESCE(NULLIF(registered_from, ''), 'unknown') as source")
+            ->selectRaw('COUNT(*) as total')
+            ->groupBy('source')
+            ->orderByDesc('total')
+            ->get();
+
+        return response()->json([
+            'total_users' => $sources->sum('total'),
+            'sources' => $sources,
+        ]);
+    }
 }
 
 

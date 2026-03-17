@@ -108,6 +108,7 @@ class SocialAuthController extends Controller
             'password' => Hash::make(Str::random(32)), // Random password (won't be used)
             'google_id' => $googleUser->id,
             'role' => 'admin', // First user in org is admin
+            'registered_from' => 'google_oauth',
             'email_verified_at' => now(), // Auto-verify email from Google
         ]);
 
