@@ -4,6 +4,7 @@ namespace App\Services\Core;
 
 use Cloudinary\Cloudinary;
 use Illuminate\Support\Facades\Log;
+use RuntimeException;
 
 class FileUploadService
 {
@@ -11,7 +12,31 @@ class FileUploadService
 
     public function __construct()
     {
-        $this->cloudinary = new Cloudinary();
+        $cloudinaryUrl = (string) config('services.cloudinary.url', '');
+        if ($cloudinaryUrl !== '') {
+            $this->cloudinary = new Cloudinary($cloudinaryUrl);
+            return;
+        }
+
+        $cloudName = (string) config('services.cloudinary.cloud_name', '');
+        $apiKey = (string) config('services.cloudinary.api_key', '');
+        $apiSecret = (string) config('services.cloudinary.api_secret', '');
+
+        if ($cloudName !== '' && $apiKey !== '' && $apiSecret !== '') {
+            $this->cloudinary = new Cloudinary([
+                'cloud' => ['cloud_name' => $cloudName],
+                'url' => ['secure' => true],
+                'api' => [
+                    'api_key' => $apiKey,
+                    'api_secret' => $apiSecret,
+                ],
+            ]);
+            return;
+        }
+
+        throw new RuntimeException(
+            'Cloudinary is not configured. Set CLOUDINARY_URL or CLOUDINARY_CLOUD_NAME/CLOUDINARY_API_KEY/CLOUDINARY_API_SECRET.'
+        );
     }
 
     /**
