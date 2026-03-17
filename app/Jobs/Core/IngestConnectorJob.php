@@ -217,12 +217,11 @@ class IngestConnectorJob implements ShouldQueue
         $uploader = new \App\Services\Core\FileUploadService();
 
         // Fetch documents created by this connector since last sync
-        $query = \App\Models\Document::where('org_id', $this->orgId)
-            ->where('connector_id', $connector->id)
-            ->orderBy('created_at');
+        $baseQuery = \App\Models\Document::where('org_id', $this->orgId)
+            ->where('connector_id', $connector->id);
 
-        $documents = $query->get();
-        $totalFiles = $documents->count();
+        $totalFiles = (clone $baseQuery)->count();
+        $documents = (clone $baseQuery)->cursor();
 
         $job->stats = array_merge($job->stats, [
             'total_files' => $totalFiles,
@@ -231,7 +230,7 @@ class IngestConnectorJob implements ShouldQueue
         ]);
         $job->save();
 
-        foreach ($documents as $index => $document) {
+        foreach ($documents as $document) {
             // Allow cancel mid-run
             $job->refresh();
             if ($job->status === 'cancelled') {
