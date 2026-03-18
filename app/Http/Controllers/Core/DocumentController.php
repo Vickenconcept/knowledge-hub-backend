@@ -18,6 +18,9 @@ class DocumentController extends Controller
     {
         $orgId = $request->user()->org_id;
         $userId = $request->user()->id;
+        $limit = (int) $request->input('limit', 50);
+        $limit = max(1, min(100, $limit));
+        $queryText = trim((string) $request->input('q', ''));
 
         // Shared scope filter for personal + organization accessible docs.
         $baseQuery = Document::where('org_id', $orgId)
@@ -37,11 +40,21 @@ class DocumentController extends Controller
                       ->orWhereNull('doc_type');
             });
 
+        if ($queryText !== '') {
+            $like = '%' . $queryText . '%';
+            $baseQuery->where(function ($q) use ($like) {
+                $q->where('title', 'like', $like)
+                    ->orWhere('doc_type', 'like', $like)
+                    ->orWhere('source_url', 'like', $like)
+                    ->orWhere('workspace_name', 'like', $like);
+            });
+        }
+
         // Page by lightweight IDs first to avoid sorting wide rows (metadata/summary/text fields).
         $docIdsPage = (clone $baseQuery)
             ->select('id')
             ->orderByDesc('created_at')
-            ->paginate(50);
+            ->paginate($limit);
 
         $orderedIds = collect($docIdsPage->items())->pluck('id')->values();
 
