@@ -603,31 +603,62 @@ class ManualUploadController extends BaseConnectorController
     {
         $orgId = $request->user()->org_id;
         $userId = $request->user()->id;
+        $perPage = (int) $request->input('limit', 20);
+        $perPage = max(1, min(100, $perPage));
+        $paginationMode = strtolower((string) $request->input('pagination', 'offset'));
 
-        // Mirror scope visibility logic used by DocumentController so Sources and Generate stay consistent.
-        $documents = Document::where('org_id', $orgId)
-            ->whereHas('connector', function ($q) {
-                $q->where('type', 'manual_upload');
-            })
-            ->where(function ($query) use ($userId) {
-                $query->where(function ($q) use ($userId) {
-                    $q->where('user_id', $userId)
-                      ->where('source_scope', 'personal');
-                })
-                ->orWhere(function ($q) {
-                    $q->where('source_scope', 'organization');
-                });
-            })
-            ->orderBy('created_at', 'desc')
-            ->paginate(20);
+        // Avoid OR conditions (bad for index usage) by splitting into two index-friendly
+        // queries and UNION-ing lightweight rows (id + created_at) before paging.
+        $personalIds = Document::query()
+            ->select('documents.id', 'documents.created_at')
+            ->join('connectors', 'documents.connector_id', '=', 'connectors.id')
+            ->where('documents.org_id', $orgId)
+            ->where('connectors.org_id', $orgId)
+            ->where('connectors.type', 'manual_upload')
+            ->where('documents.user_id', $userId)
+            ->where('documents.source_scope', 'personal');
 
-        $docIds = collect($documents->items())->pluck('id')->values();
-        $chunkCounts = Chunk::whereIn('document_id', $docIds)
+        $orgIds = Document::query()
+            ->select('documents.id', 'documents.created_at')
+            ->join('connectors', 'documents.connector_id', '=', 'connectors.id')
+            ->where('documents.org_id', $orgId)
+            ->where('connectors.org_id', $orgId)
+            ->where('connectors.type', 'manual_upload')
+            ->where('documents.source_scope', 'organization');
+
+        $union = $personalIds->unionAll($orgIds);
+
+        $base = \Illuminate\Support\Facades\DB::query()
+            ->fromSub($union, 'u')
+            ->orderByDesc('created_at')
+            ->orderByDesc('id');
+
+        // Backward compatible default: offset pagination (includes COUNT).
+        // Optional: `pagination=simple` avoids COUNT, `pagination=cursor` avoids OFFSET.
+        if ($paginationMode === 'cursor') {
+            $page = $base->cursorPaginate($perPage)->withQueryString();
+        } elseif ($paginationMode === 'simple') {
+            $page = $base->simplePaginate($perPage)->withQueryString();
+        } else {
+            $page = $base->paginate($perPage)->withQueryString();
+        }
+
+        $orderedIds = collect($page->items())->pluck('id')->values();
+
+        $docsById = Document::whereIn('id', $orderedIds)
+            ->get()
+            ->keyBy('id');
+
+        $docs = $orderedIds->map(function ($id) use ($docsById) {
+            return $docsById->get($id);
+        })->filter()->values();
+
+        $chunkCounts = Chunk::whereIn('document_id', $orderedIds)
             ->selectRaw('document_id, COUNT(*) as chunks_count')
             ->groupBy('document_id')
             ->pluck('chunks_count', 'document_id');
 
-        $uploads = collect($documents->items())->map(function (Document $doc) use ($chunkCounts) {
+        $uploads = $docs->map(function (Document $doc) use ($chunkCounts) {
             return [
                 'id' => $doc->id,
                 'title' => $doc->title,
@@ -641,14 +672,38 @@ class ManualUploadController extends BaseConnectorController
             ];
         })->values();
 
+        $pagination = [
+            'per_page' => $page->perPage(),
+        ];
+
+        if ($paginationMode === 'cursor') {
+            $pagination['next_cursor'] = $page->nextCursor()?->encode();
+            $pagination['prev_cursor'] = $page->previousCursor()?->encode();
+        } elseif ($paginationMode === 'simple') {
+            $pagination['current_page'] = method_exists($page, 'currentPage') ? $page->currentPage() : null;
+            $pagination['next_page_url'] = method_exists($page, 'nextPageUrl') ? $page->nextPageUrl() : null;
+            $pagination['prev_page_url'] = method_exists($page, 'previousPageUrl') ? $page->previousPageUrl() : null;
+        } else {
+            $pagination['current_page'] = $page->currentPage();
+            $pagination['last_page'] = null;
+            $pagination['total'] = null;
+
+            if (method_exists($page, 'lastPage')) {
+                /** @var \Illuminate\Pagination\LengthAwarePaginator $lengthPage */
+                $lengthPage = $page;
+                $pagination['last_page'] = $lengthPage->lastPage();
+            }
+
+            if (method_exists($page, 'total')) {
+                /** @var \Illuminate\Pagination\LengthAwarePaginator $lengthPage */
+                $lengthPage = $page;
+                $pagination['total'] = $lengthPage->total();
+            }
+        }
+
         return response()->json([
             'uploads' => $uploads,
-            'pagination' => [
-                'current_page' => $documents->currentPage(),
-                'last_page' => $documents->lastPage(),
-                'per_page' => $documents->perPage(),
-                'total' => $documents->total()
-            ]
+            'pagination' => $pagination,
         ]);
     }
     
