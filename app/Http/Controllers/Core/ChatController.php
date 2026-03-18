@@ -15,6 +15,50 @@ use Illuminate\Support\Facades\Log;
 
 class ChatController extends Controller
 {
+    private function formatPagination(object $page, string $mode): array
+    {
+        $mode = strtolower($mode);
+        $out = [
+            'per_page' => method_exists($page, 'perPage') ? $page->perPage() : null,
+        ];
+
+        if ($mode === 'cursor' && method_exists($page, 'nextCursor')) {
+            $out['next_cursor'] = $page->nextCursor()?->encode();
+            $out['prev_cursor'] = $page->previousCursor()?->encode();
+            return $out;
+        }
+
+        if ($mode === 'simple') {
+            $out['current_page'] = method_exists($page, 'currentPage') ? $page->currentPage() : null;
+            $out['next_page_url'] = method_exists($page, 'nextPageUrl') ? $page->nextPageUrl() : null;
+            $out['prev_page_url'] = method_exists($page, 'previousPageUrl') ? $page->previousPageUrl() : null;
+            return $out;
+        }
+
+        if (method_exists($page, 'currentPage')) {
+            $out['current_page'] = $page->currentPage();
+        }
+        if (method_exists($page, 'lastPage')) {
+            /** @var \Illuminate\Pagination\LengthAwarePaginator $lengthPage */
+            $lengthPage = $page;
+            $out['last_page'] = $lengthPage->lastPage();
+        }
+        if (method_exists($page, 'total')) {
+            /** @var \Illuminate\Pagination\LengthAwarePaginator $lengthPage */
+            $lengthPage = $page;
+            $out['total'] = $lengthPage->total();
+        }
+
+        if (method_exists($page, 'firstItem')) {
+            $out['from'] = $page->firstItem();
+        }
+        if (method_exists($page, 'lastItem')) {
+            $out['to'] = $page->lastItem();
+        }
+
+        return $out;
+    }
+
     public function ask(Request $request, EmbeddingService $embeddingService, VectorStoreService $vectorStore, RAGService $rag)
     {
         $user = $request->user();
@@ -269,54 +313,53 @@ class ChatController extends Controller
                     }
                 }
 
-                // 3. Fetch chunk rows with SECURITY FILTERING
-                $chunks = Chunk::whereIn('id', $chunkIds)
-                    ->select('id', 'document_id', 'org_id', 'chunk_index', 'text', 'char_start', 'char_end', 'token_count', 'source_scope', 'workspace_name')
-                    ->with(['document' => function($q) {
-                        $q->select('id', 'title', 'source_url', 's3_path', 'org_id', 'connector_id', 'doc_type', 'tags', 'metadata', 'source_scope', 'user_id');
-                    }, 'document.connector.userPermissions'])
+                // 3. Fetch chunk rows with SECURITY FILTERING (in SQL)
+                // This avoids eager-loading documents/connectors for chunks the user can't access.
+                $chunks = Chunk::query()
+                    ->select([
+                        'chunks.id',
+                        'chunks.document_id',
+                        'chunks.org_id',
+                        'chunks.chunk_index',
+                        'chunks.text',
+                        'chunks.char_start',
+                        'chunks.char_end',
+                        'chunks.token_count',
+                        'chunks.source_scope as chunk_source_scope',
+                        'chunks.workspace_name as chunk_workspace_name',
+                        'documents.title as document_title',
+                        'documents.source_url as document_source_url',
+                        'documents.s3_path as document_s3_path',
+                        'documents.connector_id as document_connector_id',
+                        'documents.doc_type as document_doc_type',
+                        'documents.tags as document_tags',
+                        'documents.metadata as document_metadata',
+                        'documents.source_scope as document_source_scope',
+                        'documents.user_id as document_user_id',
+                        'connectors.type as connector_type',
+                        'connectors.workspace_name as connector_workspace_name',
+                        'connectors.label as connector_label',
+                        'connectors.connection_scope as connector_connection_scope',
+                    ])
+                    ->join('documents', 'chunks.document_id', '=', 'documents.id')
+                    ->leftJoin('connectors', 'documents.connector_id', '=', 'connectors.id')
+                    ->whereIn('chunks.id', $chunkIds)
+                    ->where('documents.org_id', $orgId)
+                    ->where(function ($q) use ($user) {
+                        $q->where('documents.source_scope', 'organization')
+                          ->orWhere(function ($qq) use ($user) {
+                              $qq->where('documents.source_scope', 'personal')
+                                 ->where('documents.user_id', $user->id);
+                          });
+                    })
                     ->get()
                     ->keyBy('id');
-                
-                // CRITICAL SECURITY: Filter chunks by user permissions
-                $filteredChunks = [];
-                foreach ($chunks as $chunk) {
-                    $connector = $chunk->document->connector ?? null;
-                    
-                    // System documents (connector_id = null) are accessible to all users
-                    if (!$connector) {
-                        $filteredChunks[$chunk->id] = $chunk;
-                        Log::info('✅ System document access granted', [
-                            'user_id' => $user->id,
-                            'chunk_id' => $chunk->id,
-                            'document_id' => $chunk->document_id,
-                            'document_title' => $chunk->document->title ?? 'Unknown'
-                        ]);
-                        continue;
-                    }
-                    
-                    // Check user access to this chunk's document based on DOCUMENT source_scope
-                    if (self::userHasAccessToChunkByDocumentScope($chunk, $user->id)) {
-                        $filteredChunks[$chunk->id] = $chunk;
-                    } else {
-                        Log::info('🚫 User denied access to chunk', [
-                            'user_id' => $user->id,
-                            'chunk_id' => $chunk->id,
-                            'document_id' => $chunk->document_id,
-                            'connector_id' => $connector->id,
-                            'chunk_source_scope' => $chunk->source_scope,
-                            'document_source_scope' => $chunk->document->source_scope ?? 'unknown'
-                        ]);
-                    }
-                }
-                
-                $chunks = $filteredChunks;
-                
-                Log::info('🔒 Security filtering results', [
+
+                Log::info('🔒 Security filtering results (SQL)', [
                     'user_id' => $user->id,
                     'original_chunks' => count($chunkIds),
-                    'filtered_chunks' => count($filteredChunks),
-                    'access_denied_count' => count($chunkIds) - count($filteredChunks)
+                    'filtered_chunks' => $chunks->count(),
+                    'access_denied_count' => count($chunkIds) - $chunks->count(),
                 ]);
 
                 // Build initial snippets array (vector-ranked)
@@ -327,15 +370,15 @@ class ChatController extends Controller
                     $snippets[] = [
                         'chunk_id' => $c->id,
                         'document_id' => $c->document_id,
-                        'document_title' => $c->document->title ?? 'Unknown',
+                        'document_title' => $c->document_title ?? 'Unknown',
                         'text' => $c->text,
                         'char_start' => $c->char_start,
                         'char_end' => $c->char_end,
                         // Keep original vector score and a slot for hybrid score
                         'vector_score' => $m['score'],
                         'score' => $m['score'],
-                        'doc_type' => $c->document->doc_type ?? 'general',
-                        'tags' => $c->document->tags ?? [],
+                        'doc_type' => $c->document_doc_type ?? 'general',
+                        'tags' => $c->document_tags ?? [],
                     ];
                 }
 
@@ -759,33 +802,62 @@ class ChatController extends Controller
         ]);
 
         $orgId = $request->user()->org_id;
+        $userId = $request->user()->id;
         $query = $validated['query'];
         $topK = $validated['top_k'] ?? 10;
 
         try {
-            // Simple text search across chunks
-            $chunks = Chunk::whereHas('document', function($q) use ($orgId) {
-                $q->where('org_id', $orgId);
-            })
-            ->where('text', 'like', '%' . $query . '%')
-            ->with(['document' => function($q) {
-                $q->select('id', 'title', 'source_url', 's3_path', 'org_id');
-            }])
-            ->limit($topK)
-            ->get();
+            // Text search across chunks, with scope-aware access control.
+            // Avoid OR by UNION-ing organization + personal queries.
+            $like = '%' . $query . '%';
+
+            $orgChunks = Chunk::query()
+                ->select('chunks.id', 'chunks.document_id', 'chunks.text', 'chunks.char_start', 'chunks.char_end', 'chunks.created_at')
+                ->join('documents', 'chunks.document_id', '=', 'documents.id')
+                ->where('chunks.org_id', $orgId)
+                ->where('documents.org_id', $orgId)
+                ->where('documents.source_scope', 'organization')
+                ->where('chunks.text', 'like', $like);
+
+            $personalChunks = Chunk::query()
+                ->select('chunks.id', 'chunks.document_id', 'chunks.text', 'chunks.char_start', 'chunks.char_end', 'chunks.created_at')
+                ->join('documents', 'chunks.document_id', '=', 'documents.id')
+                ->where('chunks.org_id', $orgId)
+                ->where('documents.org_id', $orgId)
+                ->where('documents.source_scope', 'personal')
+                ->where('documents.user_id', $userId)
+                ->where('chunks.text', 'like', $like);
+
+            $union = $orgChunks->unionAll($personalChunks);
+
+            $rows = \Illuminate\Support\Facades\DB::query()
+                ->fromSub($union, 'u')
+                ->orderByDesc('created_at')
+                ->orderByDesc('id')
+                ->limit($topK)
+                ->get();
+
+            $docIds = $rows->pluck('document_id')->unique()->values();
+            $docsById = Document::whereIn('id', $docIds)
+                ->get(['id', 'title', 'source_url', 's3_path', 'org_id'])
+                ->keyBy('id');
 
             // Format results
-            $results = $chunks->map(function($chunk) use ($query) {
+            $results = $rows->map(function($row) use ($query, $docsById) {
+                $doc = $docsById->get($row->document_id);
+                if (!$doc) {
+                    return null;
+                }
                 return [
-                    'document_id' => $chunk->document->id,
-                    'title' => $chunk->document->title,
-                    'url' => $chunk->document->s3_path ?: $chunk->document->source_url, // Use Cloudinary URL if available
-                    'excerpt' => $this->extractExcerpt($chunk->text, $query),
-                    'char_start' => $chunk->char_start,
-                    'char_end' => $chunk->char_end,
+                    'document_id' => $doc->id,
+                    'title' => $doc->title,
+                    'url' => $doc->s3_path ?: $doc->source_url,
+                    'excerpt' => $this->extractExcerpt($row->text, $query),
+                    'char_start' => $row->char_start,
+                    'char_end' => $row->char_end,
                     'score' => 1.0
                 ];
-            })->toArray();
+            })->filter()->values()->toArray();
 
             return response()->json([
                 'query' => $query,
@@ -823,18 +895,32 @@ class ChatController extends Controller
     {
         $user = $request->user();
         
-        $perPage = min($request->get('per_page', 20), 100); // Max 100 per page
-        $page = max($request->get('page', 1), 1);
+        $perPage = (int) $request->get('per_page', 20);
+        $perPage = max(1, min(100, $perPage));
+        $paginationMode = strtolower((string) $request->get('pagination', 'offset')); // offset|simple|cursor
         
-        $conversations = Conversation::where('user_id', $user->id)
+        $base = Conversation::where('user_id', $user->id)
             ->orderBy('last_message_at', 'desc')
+            ->orderBy('id', 'desc')
             ->with(['messages' => function($q) {
-                $q->orderBy('created_at', 'desc')->limit(1);
+                $q->select('id', 'conversation_id', 'content', 'created_at')
+                  ->orderByDesc('created_at')
+                  ->orderByDesc('id')
+                  ->limit(1);
             }])
-            ->paginate($perPage, ['*'], 'page', $page);
+            ->select('id', 'title', 'last_message_at', 'created_at');
+
+        if ($paginationMode === 'cursor') {
+            $conversations = $base->cursorPaginate($perPage)->withQueryString();
+        } elseif ($paginationMode === 'simple') {
+            $conversations = $base->simplePaginate($perPage)->withQueryString();
+        } else {
+            $conversations = $base->paginate($perPage)->withQueryString();
+        }
 
         return response()->json([
             'success' => true,
+            'pagination_mode' => $paginationMode,
             'data' => $conversations->map(function($conv) {
                 $lastMessage = $conv->messages->first();
                 return [
@@ -845,31 +931,41 @@ class ChatController extends Controller
                     'created_at' => $conv->created_at,
                 ];
             }),
-            'pagination' => [
-                'current_page' => $conversations->currentPage(),
-                'last_page' => $conversations->lastPage(),
-                'per_page' => $conversations->perPage(),
-                'total' => $conversations->total(),
-                'from' => $conversations->firstItem(),
-                'to' => $conversations->lastItem(),
-            ]
+            'pagination' => $this->formatPagination($conversations, $paginationMode),
         ]);
     }
 
     public function getConversation(Request $request, $id)
     {
         $user = $request->user();
+        $limit = (int) $request->get('limit', 200);
+        $limit = max(1, min(500, $limit));
+        $paginationMode = strtolower((string) $request->get('pagination', 'none')); // none|cursor
         
         $conversation = Conversation::where('id', $id)
             ->where('user_id', $user->id)
-            ->with('messages')
-            ->firstOrFail();
+            ->firstOrFail(['id', 'title', 'response_style', 'created_at']);
+
+        $messagesQuery = Message::where('conversation_id', $conversation->id)
+            ->select('id', 'role', 'content', 'sources', 'created_at')
+            ->orderByDesc('created_at')
+            ->orderByDesc('id');
+
+        if ($paginationMode === 'cursor') {
+            $page = $messagesQuery->cursorPaginate($limit)->withQueryString();
+            $messages = collect($page->items())->reverse()->values();
+        } else {
+            $messages = $messagesQuery->limit($limit)->get()->reverse()->values();
+            $page = null;
+        }
 
         return response()->json([
             'id' => $conversation->id,
             'title' => $conversation->title,
             'response_style' => $conversation->response_style ?? 'comprehensive',
-            'messages' => $conversation->messages->map(function($msg) {
+            'pagination_mode' => $paginationMode,
+            'pagination' => $page ? $this->formatPagination($page, 'cursor') : null,
+            'messages' => $messages->map(function($msg) {
                 return [
                     'id' => $msg->id,
                     'role' => $msg->role,
