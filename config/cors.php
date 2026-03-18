@@ -17,7 +17,8 @@ return [
         'http://127.0.0.1:4173',
         'https://knowledge-hub-frontend.vercel.app',
         'https://api.hub.phanrise.com',
-        'https://hub.phanrise.com'
+        'https://hub.phanrise.com',
+        'https://docs.phanrise.com'
     ],
 
     'allowed_origins_patterns' => ['/localhost:\d+/', '/\.vercel\.app$/'],
