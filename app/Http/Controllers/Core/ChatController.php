@@ -499,32 +499,38 @@ class ChatController extends Controller
             
             foreach ($snippets as $idx => $snippet) {
                 $chunk = $chunks[$snippet['chunk_id']] ?? null;
-                if (!$chunk || !$chunk->document) continue;
+                if (!$chunk) continue;
 
                 $documentId = $snippet['document_id'];
                 
                 // Get connector type to determine source type
-                $connector = $chunk->document->connector;
+                $connector = $chunk->document_connector_id ? [
+                    'id' => $chunk->document_connector_id,
+                    'type' => $chunk->connector_type,
+                    'label' => $chunk->connector_label,
+                    'workspace_name' => $chunk->connector_workspace_name,
+                    'connection_scope' => $chunk->document_source_scope,
+                ] : null;
                 $sourceType = 'Unknown'; // Default
                 
                 if ($connector) {
-                    $sourceType = match($connector->type) {
+                    $sourceType = match($connector['type']) {
                         'google_drive' => 'Google Drive',
                         'slack' => 'Slack',
                         'notion' => 'Notion',
                         'dropbox' => 'Dropbox',
-                        default => ucfirst(str_replace('_', ' ', $connector->type))
+                        default => ucfirst(str_replace('_', ' ', (string) $connector['type']))
                     };
                 } else {
                     // Check if it's a system document or uploaded file
-                    $docMetadata = is_string($chunk->document->metadata) 
-                        ? json_decode($chunk->document->metadata, true) 
-                        : $chunk->document->metadata;
+                    $docMetadata = is_string($chunk->document_metadata) 
+                        ? json_decode($chunk->document_metadata, true) 
+                        : $chunk->document_metadata;
                     $isSystemDoc = $docMetadata['is_system_document'] ?? false;
                     
-                    if ($isSystemDoc || $chunk->document->doc_type === 'guide') {
+                    if ($isSystemDoc || $chunk->document_doc_type === 'guide') {
                         $sourceType = 'KHub Guide';
-                    } elseif ($chunk->document->s3_path) {
+                    } elseif ($chunk->document_s3_path) {
                         $sourceType = 'Uploaded';
                     }
                 }
@@ -533,23 +539,17 @@ class ChatController extends Controller
                 if (!isset($sourcesByDocument[$documentId])) {
                     $sourcesByDocument[$documentId] = [
                         'document_id' => $documentId,
-                        'title' => $chunk->document->title,
-                        'url' => $chunk->document->s3_path ?: $chunk->document->source_url,
+                        'title' => $chunk->document_title,
+                        'url' => $chunk->document_s3_path ?: $chunk->document_source_url,
                         'excerpts' => [],
                         'char_ranges' => [],
                         'scores' => [],
                         'type' => $sourceType,
-                        'doc_type' => $chunk->document->doc_type,
-                        'tags' => $chunk->document->tags ?? [],
-                        'metadata' => $chunk->document->metadata ?? null,
+                        'doc_type' => $chunk->document_doc_type,
+                        'tags' => $chunk->document_tags ?? [],
+                        'metadata' => $chunk->document_metadata ?? null,
                         'chunk_count' => 0,
-                        'connector' => $connector ? [
-                            'id' => $connector->id,
-                            'type' => $connector->type,
-                            'label' => $connector->label,
-                            'connection_scope' => $chunk->document->source_scope, // Use document's source_scope, not connector's
-                            'workspace_name' => $connector->workspace_name,
-                        ] : null,
+                        'connector' => $connector,
                     ];
                 }
                 
@@ -590,12 +590,12 @@ class ChatController extends Controller
                 $workspaceInfo = null;
                 if (isset($source['connector'])) {
                     $connector = $source['connector'];
-                    $documentScope = $connector['connection_scope']; // This was set to document's source_scope on line 531
+                    $documentScope = $connector['connection_scope'] ?? 'organization';
                     
                     Log::info('🔍 WORKSPACE INFO BUILDING', [
                         'document_id' => $documentId,
                         'document_title' => $source['title'],
-                        'connector_connection_scope' => $connector['connection_scope'],
+                        'connector_connection_scope' => $connector['connection_scope'] ?? null,
                         'document_scope_used' => $documentScope,
                         'workspace_name' => $connector['workspace_name'] ?? $connector['label']
                     ]);
@@ -1264,40 +1264,6 @@ class ChatController extends Controller
     /**
      * CRITICAL SECURITY: Check if user has access to a chunk based on DOCUMENT source_scope
      */
-    private function userHasAccessToChunkByDocumentScope($chunk, string $userId): bool
-    {
-        // Organization-scoped documents: accessible to all org members
-        if ($chunk->source_scope === 'organization') {
-            Log::info('✅ Organization document access granted', [
-                'user_id' => $userId,
-                'chunk_id' => $chunk->id,
-                'chunk_source_scope' => $chunk->source_scope
-            ]);
-            return true;
-        }
-        
-        // Personal-scoped documents: only accessible to the user who uploaded them
-        if ($chunk->source_scope === 'personal') {
-            $hasAccess = $chunk->document && $chunk->document->user_id == $userId;
-            Log::info('🔍 Personal document access check', [
-                'user_id' => $userId,
-                'chunk_id' => $chunk->id,
-                'chunk_source_scope' => $chunk->source_scope,
-                'document_user_id' => $chunk->document ? $chunk->document->user_id : 'no_document',
-                'has_access' => $hasAccess
-            ]);
-            return $hasAccess;
-        }
-        
-        // Default: deny access for unknown scopes
-        Log::info('🚫 Unknown scope - access denied', [
-            'user_id' => $userId,
-            'chunk_id' => $chunk->id,
-            'chunk_source_scope' => $chunk->source_scope
-        ]);
-        return false;
-    }
-
     /**
      * LEGACY: Check if user has access to a chunk based on connector scope
      * @deprecated Use userHasAccessToChunkByDocumentScope instead
@@ -1378,30 +1344,50 @@ class ChatController extends Controller
             return null;
         }
 
-        $documentQuery = Document::where('org_id', $orgId)
-            ->where(function ($q) use ($userId) {
-                $q->where('source_scope', 'organization')
-                  ->orWhere(function ($qq) use ($userId) {
-                      $qq->where('source_scope', 'personal')
-                         ->where('user_id', $userId);
-                  });
-            })
-            ->where(function ($q) use ($docHint) {
-                $q->where('title', 'like', '%' . $docHint . '%')
-                  ->orWhere('id', $docHint);
+        // Avoid OR for access filtering by UNION-ing org + personal documents.
+        $titleLike = '%' . $docHint . '%';
+
+        $orgDocs = Document::query()
+            ->select('id', 'created_at')
+            ->where('org_id', $orgId)
+            ->where('source_scope', 'organization')
+            ->where(function ($q) use ($titleLike, $docHint) {
+                $q->where('title', 'like', $titleLike)->orWhere('id', $docHint);
+            });
+
+        $personalDocs = Document::query()
+            ->select('id', 'created_at')
+            ->where('org_id', $orgId)
+            ->where('source_scope', 'personal')
+            ->where('user_id', $userId)
+            ->where(function ($q) use ($titleLike, $docHint) {
+                $q->where('title', 'like', $titleLike)->orWhere('id', $docHint);
             });
 
         if (!empty($connectorIds)) {
-            $documentQuery->whereIn('connector_id', $connectorIds);
+            $orgDocs->whereIn('connector_id', $connectorIds);
+            $personalDocs->whereIn('connector_id', $connectorIds);
         }
 
         if ($searchScope === 'organization') {
-            $documentQuery->where('source_scope', 'organization');
+            $personalDocs->whereRaw('1 = 0');
         } elseif ($searchScope === 'personal') {
-            $documentQuery->where('source_scope', 'personal')->where('user_id', $userId);
+            $orgDocs->whereRaw('1 = 0');
         }
 
-        $document = $documentQuery->orderByDesc('created_at')->first();
+        $union = $orgDocs->unionAll($personalDocs);
+        $docRow = \Illuminate\Support\Facades\DB::query()
+            ->fromSub($union, 'd')
+            ->orderByDesc('created_at')
+            ->orderByDesc('id')
+            ->limit(1)
+            ->first();
+
+        if (!$docRow) {
+            return null;
+        }
+
+        $document = Document::where('id', $docRow->id)->first();
         if (!$document) {
             return null;
         }
