@@ -84,10 +84,12 @@ class ContentStudioV1Controller extends Controller
         $start = microtime(true);
         $data = $request->validate([
             'per_page' => 'nullable|integer|min:1|max:100',
+            'pagination' => 'nullable|string|in:offset,simple,cursor',
         ]);
 
         $perPage = (int) ($data['per_page'] ?? 20);
-        $result = $this->service->listContentRuns((string) $request->user()->org_id, (int) $request->user()->id, $perPage);
+        $pagination = (string) ($data['pagination'] ?? 'offset');
+        $result = $this->service->listContentRuns((string) $request->user()->org_id, (int) $request->user()->id, $perPage, $pagination);
         return $this->ok($result, $start);
     }
 

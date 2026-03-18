@@ -8,6 +8,7 @@ use App\Models\ContentStudioGenerationItem;
 use App\Models\Document;
 use App\Services\Core\RAGService;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
@@ -75,12 +76,23 @@ class ContentStudioV1Service
         ];
     }
 
-    public function listContentRuns(string $orgId, int $userId, int $perPage = 20): array
+    public function listContentRuns(string $orgId, int $userId, int $perPage = 20, string $paginationMode = 'offset'): array
     {
-        $page = ContentStudioGeneration::where('org_id', $orgId)
+        $perPage = max(1, min(100, $perPage));
+        $paginationMode = strtolower($paginationMode);
+
+        $base = ContentStudioGeneration::where('org_id', $orgId)
             ->where('user_id', $userId)
             ->orderByDesc('created_at')
-            ->paginate(max(1, min(100, $perPage)));
+            ->orderByDesc('id');
+
+        if ($paginationMode === 'cursor') {
+            $page = $base->cursorPaginate($perPage)->withQueryString();
+        } elseif ($paginationMode === 'simple') {
+            $page = $base->simplePaginate($perPage)->withQueryString();
+        } else {
+            $page = $base->paginate($perPage)->withQueryString();
+        }
 
         return [
             'data' => collect($page->items())->map(function (ContentStudioGeneration $run) {
@@ -97,12 +109,8 @@ class ContentStudioV1Service
                     'created_at' => $run->created_at,
                 ];
             })->values()->all(),
-            'pagination' => [
-                'current_page' => $page->currentPage(),
-                'last_page' => $page->lastPage(),
-                'per_page' => $page->perPage(),
-                'total' => $page->total(),
-            ],
+            'pagination_mode' => $paginationMode,
+            'pagination' => $this->formatPagination($page, $paginationMode),
         ];
     }
 
@@ -153,14 +161,16 @@ class ContentStudioV1Service
 
     public function getOverview(string $orgId, int $userId): array
     {
-        $base = ContentStudioGeneration::where('org_id', $orgId)->where('user_id', $userId);
-        $totalRuns = (clone $base)->count();
-        $totalOutputs = (int) ((clone $base)->sum('outputs_count') ?? 0);
-        $totalImages = (int) ((clone $base)->sum('images_count') ?? 0);
-        $lastRun = (clone $base)->orderByDesc('created_at')->first();
+        // One aggregate query instead of count+sum+sum+first.
+        $agg = ContentStudioGeneration::where('org_id', $orgId)
+            ->where('user_id', $userId)
+            ->selectRaw('COUNT(*) as runs, COALESCE(SUM(outputs_count),0) as outputs, COALESCE(SUM(images_count),0) as images, MAX(created_at) as last_generated_at')
+            ->first();
 
-        $recentRuns = (clone $base)
+        $recentRuns = ContentStudioGeneration::where('org_id', $orgId)
+            ->where('user_id', $userId)
             ->orderByDesc('created_at')
+            ->orderByDesc('id')
             ->limit(5)
             ->get()
             ->map(function (ContentStudioGeneration $run) {
@@ -188,10 +198,10 @@ class ContentStudioV1Service
 
         return [
             'totals' => [
-                'runs' => $totalRuns,
-                'outputs' => $totalOutputs,
-                'images' => $totalImages,
-                'last_generated_at' => $lastRun?->created_at,
+                'runs' => (int) ($agg->runs ?? 0),
+                'outputs' => (int) ($agg->outputs ?? 0),
+                'images' => (int) ($agg->images ?? 0),
+                'last_generated_at' => $agg->last_generated_at ?? null,
             ],
             'recent_runs' => $recentRuns,
             'top_output_types' => $topTypes,
@@ -316,19 +326,77 @@ class ContentStudioV1Service
 
     private function resolveDocuments(string $orgId, int $userId, array $documentIds): Collection
     {
-        $query = Document::where('org_id', $orgId)
-            ->where(function ($q) use ($userId) {
-                $q->where('source_scope', 'organization')
-                    ->orWhere(function ($qq) use ($userId) {
-                        $qq->where('source_scope', 'personal')->where('user_id', $userId);
-                    });
-            });
+        // Avoid OR to keep indexes usable at scale: UNION org + personal, then hydrate.
+        $documentIds = array_values(array_filter($documentIds));
+
+        $orgDocs = Document::query()
+            ->select('id', 'created_at')
+            ->where('org_id', $orgId)
+            ->where('source_scope', 'organization');
+
+        $personalDocs = Document::query()
+            ->select('id', 'created_at')
+            ->where('org_id', $orgId)
+            ->where('source_scope', 'personal')
+            ->where('user_id', $userId);
 
         if (!empty($documentIds)) {
-            $query->whereIn('id', $documentIds);
+            $orgDocs->whereIn('id', $documentIds);
+            $personalDocs->whereIn('id', $documentIds);
         }
 
-        return $query->orderByDesc('created_at')->limit(20)->get(['id', 'title', 'doc_type', 'source_url', 's3_path']);
+        $union = $orgDocs->unionAll($personalDocs);
+        $rows = DB::query()
+            ->fromSub($union, 'd')
+            ->orderByDesc('created_at')
+            ->orderByDesc('id')
+            ->limit(20)
+            ->get();
+
+        $orderedIds = $rows->pluck('id')->values();
+        if ($orderedIds->isEmpty()) {
+            return collect();
+        }
+
+        $docsById = Document::whereIn('id', $orderedIds)
+            ->get(['id', 'title', 'doc_type', 'source_url', 's3_path', 'created_at'])
+            ->keyBy('id');
+
+        return $orderedIds->map(fn ($id) => $docsById->get($id))->filter()->values();
+    }
+
+    private function formatPagination(object $page, string $mode): array
+    {
+        $out = [
+            'per_page' => method_exists($page, 'perPage') ? $page->perPage() : null,
+        ];
+
+        if ($mode === 'cursor' && method_exists($page, 'nextCursor')) {
+            $out['next_cursor'] = $page->nextCursor()?->encode();
+            $out['prev_cursor'] = $page->previousCursor()?->encode();
+            return $out;
+        }
+
+        if ($mode === 'simple') {
+            $out['current_page'] = method_exists($page, 'currentPage') ? $page->currentPage() : null;
+            $out['next_page_url'] = method_exists($page, 'nextPageUrl') ? $page->nextPageUrl() : null;
+            $out['prev_page_url'] = method_exists($page, 'previousPageUrl') ? $page->previousPageUrl() : null;
+            return $out;
+        }
+
+        if (method_exists($page, 'currentPage')) {
+            $out['current_page'] = $page->currentPage();
+        }
+
+        if (method_exists($page, 'lastPage')) {
+            $out['last_page'] = $page->lastPage();
+        }
+
+        if (method_exists($page, 'total')) {
+            $out['total'] = $page->total();
+        }
+
+        return $out;
     }
 
     private function collectChunkText(array $documentIds, int $maxChunks): string
